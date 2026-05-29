@@ -34,6 +34,16 @@ skills/factor-timing-advisor/workspace/runs/default/
 
 每天只需要替换输入 CSV，然后跑 `score-update`。
 
+### 0. 拉取最新数据（每次运行前必做）
+
+运行前先从 GitHub 拉取最新的 `宽基得分.csv`，确保数据目录已同步：
+
+```bash
+git pull origin main
+```
+
+如果 `workspace/data/宽基得分.csv` 有更新，再继续后续步骤。
+
 ### 1. 更新输入数据
 
 把最新宽基数据放到：
@@ -51,10 +61,10 @@ skills/factor-timing-advisor/workspace/data/宽基得分.csv
 
 ### 2. 跑日更链路
 
-在项目根目录 `D:\PyProjects\index_timing` 执行：
+在项目根目录执行：
 
-```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py score-update --csv .\skills\factor-timing-advisor\workspace\data\宽基得分.csv --output-dir .\skills\factor-timing-advisor\workspace\runs\default
+```bash
+python skills/factor-timing-advisor/scripts/run_pipeline.py score-update --csv skills/factor-timing-advisor/workspace/data/宽基得分.csv --output-dir skills/factor-timing-advisor/workspace/runs/default
 ```
 
 日更会刷新：
@@ -107,8 +117,8 @@ skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report
 
 在项目根目录执行：
 
-```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py all --csv .\skills\factor-timing-advisor\workspace\data\宽基得分.csv --output-dir .\skills\factor-timing-advisor\workspace\runs\default
+```bash
+python skills/factor-timing-advisor/scripts/run_pipeline.py all --csv skills/factor-timing-advisor/workspace/data/宽基得分.csv --output-dir skills/factor-timing-advisor/workspace/runs/default
 ```
 
 周末全量会覆盖更新：
@@ -133,20 +143,20 @@ skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report
 
 只重新生成报告：
 
-```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py report --input-dir .\skills\factor-timing-advisor\workspace\runs\default
+```bash
+python skills/factor-timing-advisor/scripts/run_pipeline.py report --input-dir skills/factor-timing-advisor/workspace/runs/default
 ```
 
 只重跑 score 策略：
 
-```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py strategy --input-dir .\skills\factor-timing-advisor\workspace\runs\default --output-dir .\skills\factor-timing-advisor\workspace\runs\default
+```bash
+python skills/factor-timing-advisor/scripts/run_pipeline.py strategy --input-dir skills/factor-timing-advisor/workspace/runs/default --output-dir skills/factor-timing-advisor/workspace/runs/default
 ```
 
 只重画图：
 
-```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py plot --input-dir .\skills\factor-timing-advisor\workspace\runs\default
+```bash
+python skills/factor-timing-advisor/scripts/run_pipeline.py plot --input-dir skills/factor-timing-advisor/workspace/runs/default
 ```
 
 ## 什么时候必须全量
