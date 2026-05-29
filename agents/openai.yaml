@@ -1,0 +1,5 @@
+version: 1
+interface:
+  display_name: 因子择时顾问
+  short_description: 运行指数择时主流程，生成回测、报告和图表。
+  default_prompt: 先确认仓库内存在 run_baseline_pipeline.py，然后按主流程运行或更新结果目录。
