@@ -217,3 +217,16 @@ skills/factor-timing-advisor/
 - `references/开平仓规则说明.md`
 - `references/baseline_pipeline_flow.md`
 - `references/event_condition_checklist.md`
+## 代码仓库
+
+当前 skill 同时维护 GitHub 和 Gitee 两个远端：
+
+- GitHub: `https://github.com/YuanZhaohan/factor-timing-advisor.git`
+- Gitee: `https://gitee.com/zhaohanyuan/factor-timing-advisor.git`
+
+同步更新时建议两个远端都推：
+
+```bash
+git push origin main
+git push gitee main
+```
