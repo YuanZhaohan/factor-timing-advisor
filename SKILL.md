@@ -231,3 +231,11 @@ skills/factor-timing-advisor/
 git push origin main
 git push gitee main
 ```
+
+## 更新运行原则
+
+- 默认每次更新只跑增量链路：`score-update`。
+- 周末也不默认跑全量回测；只有用户明确要求“全量重跑”“全量回测”“跑 all”“重建 rule_pair / open_close_trades / score cache”时，才运行全量流程。
+- 如果只是更新 `workspace/data/宽基得分.csv` 后生成最新报告，仍然只跑 `score-update`。
+- 生成 HTML 报告前必须检查增量结果是否已经更新到输入数据最新日期：对比 `workspace/data/宽基得分.csv` 的最大日期与 `workspace/runs/default/results/score/monthly_refresh_daily_score.parquet`、`workspace/runs/default/results/signals/signals.parquet` 的最大日期。若结果日期落后，不要直接生成 HTML，先提示用户需要运行增量更新。
+- 程序运行慢时不要 kill 或中断进程。事件、score、报告和图表链路可能需要数分钟，必须等待命令自然跑完；只有明确报错、长时间无 CPU/IO 活动，或用户明确要求停止时，才考虑终止。
