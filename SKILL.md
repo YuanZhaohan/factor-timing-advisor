@@ -217,6 +217,7 @@ skills/factor-timing-advisor/
 - `references/开平仓规则说明.md`
 - `references/baseline_pipeline_flow.md`
 - `references/event_condition_checklist.md`
+
 ## 代码仓库
 
 当前 skill 同时维护 GitHub 和 Gitee 两个远端：
