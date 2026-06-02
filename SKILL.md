@@ -14,13 +14,13 @@ user-invocable: true
 正式入口：
 
 ```text
-skills/factor-timing-advisor/scripts/run_pipeline.py
+scripts/run_pipeline.py
 ```
 
 默认运行目录：
 
 ```text
-skills/factor-timing-advisor/workspace/runs/default/
+workspace/runs/default/
 ```
 
 ## 数据格式约定
@@ -49,7 +49,7 @@ git pull origin main
 把最新宽基数据放到：
 
 ```text
-skills/factor-timing-advisor/workspace/data/宽基得分.csv
+workspace/data/宽基得分.csv
 ```
 
 要求：
@@ -64,7 +64,7 @@ skills/factor-timing-advisor/workspace/data/宽基得分.csv
 在项目根目录执行：
 
 ```bash
-python skills/factor-timing-advisor/scripts/run_pipeline.py score-update --csv skills/factor-timing-advisor/workspace/data/宽基得分.csv --output-dir skills/factor-timing-advisor/workspace/runs/default
+python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.csv --output-dir workspace/runs/default
 ```
 
 日更会刷新：
@@ -100,7 +100,7 @@ results/events/open_close_trades.parquet
 日更完成后打开：
 
 ```text
-skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report.html
+workspace/runs/default/results/report/timing_report.html
 ```
 
 报告包含三块：
@@ -118,7 +118,7 @@ skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report
 在项目根目录执行：
 
 ```bash
-python skills/factor-timing-advisor/scripts/run_pipeline.py all --csv skills/factor-timing-advisor/workspace/data/宽基得分.csv --output-dir skills/factor-timing-advisor/workspace/runs/default
+python scripts/run_pipeline.py all --csv workspace/data/宽基得分.csv --output-dir workspace/runs/default
 ```
 
 周末全量会覆盖更新：
@@ -144,19 +144,19 @@ python skills/factor-timing-advisor/scripts/run_pipeline.py all --csv skills/fac
 只重新生成报告：
 
 ```bash
-python skills/factor-timing-advisor/scripts/run_pipeline.py report --input-dir skills/factor-timing-advisor/workspace/runs/default
+python scripts/run_pipeline.py report --input-dir workspace/runs/default
 ```
 
 只重跑 score 策略：
 
 ```bash
-python skills/factor-timing-advisor/scripts/run_pipeline.py strategy --input-dir skills/factor-timing-advisor/workspace/runs/default --output-dir skills/factor-timing-advisor/workspace/runs/default
+python scripts/run_pipeline.py strategy --input-dir workspace/runs/default --output-dir workspace/runs/default
 ```
 
 只重画图：
 
 ```bash
-python skills/factor-timing-advisor/scripts/run_pipeline.py plot --input-dir skills/factor-timing-advisor/workspace/runs/default
+python scripts/run_pipeline.py plot --input-dir workspace/runs/default
 ```
 
 ## 什么时候必须全量
@@ -173,7 +173,7 @@ python skills/factor-timing-advisor/scripts/run_pipeline.py plot --input-dir ski
 ## 目录约定
 
 ```text
-skills/factor-timing-advisor/
+factor-timing-advisor/
   agents/
   references/
   runtime/
