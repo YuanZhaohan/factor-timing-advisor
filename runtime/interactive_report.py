@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import date, datetime
 from html import escape as html_escape
 from pathlib import Path
 from typing import Any
@@ -343,8 +344,142 @@ def _long_spans(position_df: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timest
     return spans
 
 
+def _is_missing_x_value(value: Any) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _sample_x_values(values: Any, max_values: int = 8) -> list[Any]:
+    if values is None:
+        return []
+    if isinstance(values, pd.Series):
+        return values.dropna().head(max_values).tolist()
+    sampled: list[Any] = []
+    try:
+        iterator = iter(values)
+    except TypeError:
+        return sampled
+    for value in iterator:
+        if _is_missing_x_value(value):
+            continue
+        sampled.append(value)
+        if len(sampled) >= max_values:
+            break
+    return sampled
+
+
+def _is_date_like_value(value: Any) -> bool:
+    if isinstance(value, (pd.Timestamp, np.datetime64, datetime, date)):
+        return True
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not any(sep in text for sep in ("-", "/", "T", ":")):
+            return False
+        return not pd.isna(pd.to_datetime(text, errors="coerce"))
+    return False
+
+
+def _figure_has_date_xaxis(fig: go.Figure) -> bool:
+    for trace in fig.data:
+        x_values = getattr(trace, "x", None)
+        if any(_is_date_like_value(value) for value in _sample_x_values(x_values)):
+            return True
+    return False
+
+
+def _yaxis_key_from_xaxis(axis_json: dict[str, Any]) -> str:
+    anchor = axis_json.get("anchor")
+    if not isinstance(anchor, str) or not anchor.startswith("y"):
+        return "yaxis"
+    return "yaxis" if anchor == "y" else f"yaxis{anchor[1:]}"
+
+
+def _axis_vertical_domain(axis_key: str, layout_json: dict[str, Any]) -> tuple[float, float]:
+    axis_json = layout_json.get(axis_key, {})
+    yaxis_json = layout_json.get(_yaxis_key_from_xaxis(axis_json), {})
+    domain = yaxis_json.get("domain")
+    if isinstance(domain, list) and len(domain) == 2:
+        return float(domain[0]), float(domain[1])
+    return 0.0, 1.0
+
+
+def _date_filter_axis_keys(fig: go.Figure) -> tuple[list[str], str, str]:
+    layout_json = fig.layout.to_plotly_json()
+    axis_keys = sorted(
+        [key for key in layout_json if key == "xaxis" or (key.startswith("xaxis") and key[5:].isdigit())],
+        key=lambda key: 1 if key == "xaxis" else int(key[5:]),
+    )
+    if not axis_keys:
+        axis_keys = ["xaxis"]
+    top_axis = max(axis_keys, key=lambda key: _axis_vertical_domain(key, layout_json)[1])
+    bottom_axis = min(axis_keys, key=lambda key: _axis_vertical_domain(key, layout_json)[0])
+    return axis_keys, top_axis, bottom_axis
+
+
+def _enable_date_filter(fig: go.Figure) -> bool:
+    if not _figure_has_date_xaxis(fig):
+        return False
+
+    axis_keys, top_axis, bottom_axis = _date_filter_axis_keys(fig)
+    range_selector = dict(
+        buttons=[
+            dict(count=1, label="1月", step="month", stepmode="backward"),
+            dict(count=3, label="3月", step="month", stepmode="backward"),
+            dict(count=6, label="6月", step="month", stepmode="backward"),
+            dict(count=1, label="今年", step="year", stepmode="todate"),
+            dict(count=1, label="1年", step="year", stepmode="backward"),
+            dict(count=3, label="3年", step="year", stepmode="backward"),
+            dict(step="all", label="全部"),
+        ],
+        x=0,
+        y=1.08,
+        xanchor="left",
+        yanchor="bottom",
+        bgcolor="rgba(248,250,252,0.96)",
+        activecolor="#dbeafe",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
+        font=dict(size=11, color="#334155"),
+    )
+    range_slider = dict(
+        visible=True,
+        thickness=0.075,
+        bgcolor="#f8fafc",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
+    )
+
+    layout_updates: dict[str, dict[str, Any]] = {}
+    for axis_key in axis_keys:
+        axis_update: dict[str, Any] = {"type": "date"}
+        if axis_key == top_axis:
+            axis_update["rangeselector"] = range_selector
+        if axis_key == bottom_axis:
+            axis_update["rangeslider"] = range_slider
+        else:
+            axis_update["rangeslider"] = {"visible": False}
+        layout_updates[axis_key] = axis_update
+    fig.update_layout(**layout_updates)
+
+    current_margin = fig.layout.margin.to_plotly_json() if fig.layout.margin else {}
+    margin_update = {
+        key: value
+        for key, value in current_margin.items()
+        if key in {"l", "r", "t", "b", "pad", "autoexpand"} and value is not None
+    }
+    margin_update["t"] = max(int(current_margin.get("t") or 0), 58)
+    margin_update["b"] = max(int(current_margin.get("b") or 0), 66)
+    fig.update_layout(margin=margin_update)
+    return True
+
+
 def _fig_html(fig: go.Figure, height: int | None = None) -> str:
+    has_date_filter = _enable_date_filter(fig)
     if height is not None:
+        if has_date_filter:
+            height += 48
         fig.update_layout(height=height)
     return pio.to_html(
         fig,
