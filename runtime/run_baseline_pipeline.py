@@ -25,7 +25,7 @@ from role_strategy import (
 from signal_generation import save_signal_table
 from baseline_score_strategy import backtest_z_rules, build_all_z_rules, plot_best_rule
 from io_utils import read_run_table, read_table, resolve_table_file, write_table
-from timing_config import CODE_COL
+from timing_config import CODE_COL, DEFAULT_TAXONOMY_PATH
 
 
 DEFAULT_HORIZONS = (1, 3, 5, 10, 15, 20, 60)
@@ -301,8 +301,13 @@ def run_reporting_pipeline(
         output_dir=output_dirs["report"],
         top_n=report_top_n,
     )
-    taxonomy_path = Path("skills") / "factor-timing-advisor" / "references" / "factor_taxonomy.md"
-    taxonomy_arg = str(taxonomy_path) if taxonomy_path.exists() else None
+    if not DEFAULT_TAXONOMY_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing factor taxonomy: {DEFAULT_TAXONOMY_PATH}. "
+            "The advisor report needs this file to map factor directions; "
+            "without it scores can collapse to zero."
+        )
+    taxonomy_arg = str(DEFAULT_TAXONOMY_PATH)
     html_data = build_view_data(
         str(Path(input_dir)),
         taxonomy_path=taxonomy_arg,

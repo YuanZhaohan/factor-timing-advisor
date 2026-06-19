@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 DATE_COL = "\u65e5\u671f"
 CODE_COL = "\u4ee3\u7801"
 NAME_COL = "\u6307\u6570\u540d\u79f0"
@@ -17,7 +18,7 @@ SIGNAL_NAME_COL = "instrument_name"
 SIGNAL_FACTOR_COL = "factor"
 SIGNAL_PATTERN_COL = "pattern"
 SIGNAL_VALUE_COL = "signal"
-DEFAULT_TAXONOMY_PATH = Path("skills/factor-timing-advisor/references/factor_taxonomy.md")
+DEFAULT_TAXONOMY_PATH = SKILL_ROOT / "references" / "factor_taxonomy.md"
 STATE_LONG = "\u591a"
 STATE_FLAT = "\u7a7a"
 STATE_WAIT = "\u89c2\u671b"
