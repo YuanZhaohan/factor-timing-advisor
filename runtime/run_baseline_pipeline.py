@@ -200,6 +200,7 @@ def run_daily_refresh_pipeline(
         min_raw_open_events_per_quarter=min_raw_open_events_per_quarter,
         include_trade_summary=False,
     )
+    utility = build_factor_signal_utility(event_summary, output_dir=dirs["score"])
 
     daily_score = update_monthly_refresh_daily_score_incremental(
         df=df,
@@ -245,6 +246,7 @@ def run_daily_refresh_pipeline(
         "signals": len(signal_table),
         "event_summary_rows": len(event_summary),
         "trade_summary_rows": len(trade_summary),
+        "utility_rows": len(utility),
         "daily_score_rows": len(daily_score),
         "best_rule_pair_rows": len(rule_summary),
         "equity_curve_rows": len(equity_curves),

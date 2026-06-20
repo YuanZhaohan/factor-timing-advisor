@@ -727,6 +727,8 @@ def _make_strategy_html(strategy_df: pd.DataFrame, summary_row: pd.Series | None
     if df.empty:
         raise ValueError("strategy dataframe is empty")
 
+    open_rule_cn = format_rule_name_cn(str(df["open_rule"].dropna().iloc[0])) if "open_rule" in df and not df["open_rule"].dropna().empty else "未识别"
+    close_rule_cn = format_rule_name_cn(str(df["close_rule"].dropna().iloc[0])) if "close_rule" in df and not df["close_rule"].dropna().empty else "未识别"
     font = dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)
     hover_font = dict(font=font)
     template = "plotly_white"
@@ -899,6 +901,11 @@ def _make_strategy_html(strategy_df: pd.DataFrame, summary_row: pd.Series | None
     return (
         "<div class='strategy-figures'>"
         "<div class='plot-panel'><div class='plot-panel-title'>1. 价格与开平仓点</div>"
+        "<div class='plot-panel-rule-lines' style='font-size:12.5px;color:#344054;"
+        "background:#f8fafc;border-bottom:1px solid #e5e7eb;padding:7px 12px;line-height:1.6;'>"
+        f"<div><b>开仓规则：</b>{html_escape(open_rule_cn)}</div>"
+        f"<div><b>平仓规则：</b>{html_escape(close_rule_cn)}</div>"
+        "</div>"
         f"{_fig_html(fig_price, height=340)}"
         "</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>2. 抄底得分与逃顶得分</div>"
