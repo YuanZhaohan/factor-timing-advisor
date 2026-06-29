@@ -198,6 +198,167 @@ def _score_z20_forward_stats(strategy_df: pd.DataFrame, horizon: int = 5) -> lis
     return rows
 
 
+def _signal_counts_from_df(signals_df: pd.DataFrame, top_n_days: int = 20) -> dict[str, Any]:
+    if signals_df.empty or SIGNAL_DATE_COL not in signals_df.columns:
+        return {"daily": [], "top_factors": [], "top_patterns": [], "total_recent": 0}
+    df = signals_df.copy()
+    df[SIGNAL_DATE_COL] = pd.to_datetime(df[SIGNAL_DATE_COL], errors="coerce")
+    df = df.dropna(subset=[SIGNAL_DATE_COL])
+    if df.empty:
+        return {"daily": [], "top_factors": [], "top_patterns": [], "total_recent": 0}
+    df["_date_text"] = df[SIGNAL_DATE_COL].dt.date.astype(str)
+    recent_dates = sorted(df["_date_text"].dropna().unique().tolist(), reverse=True)[:top_n_days]
+    recent = df[df["_date_text"].isin(recent_dates)].copy()
+    daily = []
+    if not recent.empty:
+        day_counts = (
+            recent.assign(
+                is_open=recent[SIGNAL_VALUE_COL].astype(str).eq("1"),
+                is_close=recent[SIGNAL_VALUE_COL].astype(str).eq("-1"),
+            )
+            .groupby("_date_text", sort=False)
+            .agg(open=("is_open", "sum"), close=("is_close", "sum"), factors=(SIGNAL_FACTOR_COL, "nunique"))
+            .reset_index()
+            .rename(columns={"_date_text": "date"})
+        )
+        daily = day_counts.to_dict(orient="records")
+    factor_totals = (
+        recent[recent[SIGNAL_VALUE_COL].astype(str).eq("1")]
+        .groupby(SIGNAL_FACTOR_COL)
+        .size()
+        .sort_values(ascending=False)
+        .head(30)
+    )
+    pattern_totals = (
+        recent[recent[SIGNAL_VALUE_COL].astype(str).eq("1")]
+        .groupby(SIGNAL_PATTERN_COL)
+        .size()
+        .sort_values(ascending=False)
+        .head(30)
+    )
+    return {
+        "daily": daily,
+        "top_factors": list(factor_totals.items()),
+        "top_patterns": list(pattern_totals.items()),
+        "total_recent": int(recent[recent[SIGNAL_VALUE_COL].astype(str).eq("1")].shape[0]),
+    }
+
+
+def _filter_effective_signals_expanding(
+    input_df: pd.DataFrame,
+    signals_df: pd.DataFrame,
+    horizon: int = 5,
+    warmup_days: int = 252,
+    win_threshold: float = 0.5,
+    payoff_threshold: float = 1.0,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    meta = {
+        "raw_signal_count": int(len(signals_df)) if signals_df is not None else 0,
+        "effective_signal_count": 0,
+        "horizon": horizon,
+        "warmup_days": warmup_days,
+        "win_threshold": win_threshold,
+        "payoff_threshold": payoff_threshold,
+    }
+    required_signals = {SIGNAL_DATE_COL, SIGNAL_INSTRUMENT_COL, SIGNAL_FACTOR_COL, SIGNAL_PATTERN_COL, SIGNAL_VALUE_COL}
+    if input_df.empty or signals_df.empty or PRICE_COL not in input_df.columns or not required_signals.issubset(signals_df.columns):
+        return signals_df.iloc[0:0].copy(), meta
+
+    sig = signals_df.copy().reset_index(drop=True)
+    sig[SIGNAL_DATE_COL] = pd.to_datetime(sig[SIGNAL_DATE_COL], errors="coerce").dt.normalize()
+    sig[SIGNAL_VALUE_COL] = pd.to_numeric(sig[SIGNAL_VALUE_COL], errors="coerce")
+    sig = sig.dropna(subset=[SIGNAL_DATE_COL, SIGNAL_VALUE_COL]).copy()
+    sig = sig[sig[SIGNAL_VALUE_COL].isin([1, -1])].reset_index(drop=True)
+    if sig.empty:
+        return sig, meta
+
+    price_cols = [DATE_COL, PRICE_COL]
+    if CODE_COL in input_df.columns:
+        price_cols.insert(0, CODE_COL)
+    price = input_df[price_cols].copy()
+    price[DATE_COL] = pd.to_datetime(price[DATE_COL], errors="coerce").dt.normalize()
+    price = price.dropna(subset=[DATE_COL])
+    if CODE_COL not in price.columns:
+        instrument = sig[SIGNAL_INSTRUMENT_COL].astype(str).mode().iloc[0]
+        price[CODE_COL] = instrument
+    price[CODE_COL] = price[CODE_COL].astype(str)
+
+    price_parts = []
+    for code, group in price.groupby(CODE_COL, sort=False):
+        group = group.sort_values(DATE_COL).drop_duplicates(DATE_COL).reset_index(drop=True)
+        close = pd.to_numeric(group[PRICE_COL], errors="coerce")
+        part = group[[CODE_COL, DATE_COL]].copy()
+        part["_date_idx"] = np.arange(len(group), dtype=int)
+        part["_known_idx"] = part["_date_idx"] + horizon
+        part["_forward_return"] = close.shift(-horizon) / close - 1.0
+        price_parts.append(part)
+    if not price_parts:
+        return sig.iloc[0:0].copy(), meta
+    price_map = pd.concat(price_parts, ignore_index=True)
+
+    sig[SIGNAL_INSTRUMENT_COL] = sig[SIGNAL_INSTRUMENT_COL].astype(str)
+    sig = sig.merge(
+        price_map,
+        left_on=[SIGNAL_INSTRUMENT_COL, SIGNAL_DATE_COL],
+        right_on=[CODE_COL, DATE_COL],
+        how="left",
+    )
+    sig = sig[sig["_date_idx"].notna()].copy().reset_index(drop=True)
+    if sig.empty:
+        return sig.iloc[0:0].copy(), meta
+    sig["_date_idx"] = sig["_date_idx"].astype(int)
+    sig["_known_idx"] = pd.to_numeric(sig["_known_idx"], errors="coerce")
+    sig["_directional_return"] = np.where(
+        sig[SIGNAL_VALUE_COL].eq(1),
+        sig["_forward_return"],
+        -sig["_forward_return"],
+    )
+
+    pass_mask = np.zeros(len(sig), dtype=bool)
+    group_cols = [SIGNAL_INSTRUMENT_COL, SIGNAL_FACTOR_COL, SIGNAL_PATTERN_COL, SIGNAL_VALUE_COL]
+    for _, group in sig.groupby(group_cols, sort=False):
+        obs = group[group["_directional_return"].notna() & group["_known_idx"].notna()].copy()
+        if obs.empty:
+            continue
+        obs = obs.sort_values("_known_idx")
+        known_idx = obs["_known_idx"].to_numpy(dtype=float)
+        directional = obs["_directional_return"].to_numpy(dtype=float)
+        wins = directional > 0
+        losses = directional < 0
+        cum_count = np.r_[0, np.arange(1, len(obs) + 1)]
+        cum_win_count = np.r_[0, np.cumsum(wins)]
+        cum_loss_count = np.r_[0, np.cumsum(losses)]
+        cum_win_sum = np.r_[0.0, np.cumsum(np.where(wins, directional, 0.0))]
+        cum_loss_sum = np.r_[0.0, np.cumsum(np.where(losses, -directional, 0.0))]
+
+        trigger_idx = group["_date_idx"].to_numpy(dtype=float)
+        hist_pos = np.searchsorted(known_idx, trigger_idx, side="left")
+        count = cum_count[hist_pos].astype(float)
+        win_count = cum_win_count[hist_pos].astype(float)
+        loss_count = cum_loss_count[hist_pos].astype(float)
+        win_sum = cum_win_sum[hist_pos]
+        loss_sum = cum_loss_sum[hist_pos]
+
+        win_rate = np.divide(win_count, count, out=np.full_like(count, np.nan, dtype=float), where=count > 0)
+        avg_win = np.divide(win_sum, win_count, out=np.full_like(count, np.nan, dtype=float), where=win_count > 0)
+        avg_loss = np.divide(loss_sum, loss_count, out=np.zeros_like(count, dtype=float), where=loss_count > 0)
+        payoff = np.divide(avg_win, avg_loss, out=np.full_like(count, np.inf, dtype=float), where=avg_loss > 0)
+        eligible = (
+            (trigger_idx >= warmup_days)
+            & (count > 0)
+            & (win_rate > win_threshold)
+            & (payoff > payoff_threshold)
+        )
+        pass_mask[group.index.to_numpy()] = eligible
+
+    filtered = sig.loc[pass_mask, signals_df.columns.intersection(sig.columns).tolist()].copy()
+    meta["effective_signal_count"] = int(len(filtered))
+    if not filtered.empty:
+        meta["first_effective_date"] = str(pd.to_datetime(filtered[SIGNAL_DATE_COL]).min().date())
+        meta["last_effective_date"] = str(pd.to_datetime(filtered[SIGNAL_DATE_COL]).max().date())
+    return filtered, meta
+
+
 def _event_score_forward_stats(
     input_df: pd.DataFrame,
     signals_df: pd.DataFrame,
@@ -542,7 +703,7 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
     strategy_z20_html = ""
     strategy_status: dict[str, Any] = {}
     strategy_z20_stats: list[dict[str, Any]] = []
-    event_score_stats: list[dict[str, Any]] = []
+    effective_signal_meta: dict[str, Any] = {}
     recent_signal_chart_html = ""
     if not strategy_df.empty:
         summary_row = strategy_summary_df.iloc[0] if not strategy_summary_df.empty else None
@@ -551,15 +712,14 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         strategy_plot_html = _make_strategy_html(strategy_df, summary_row=summary_row)
         strategy_z20_html = _make_score_z20_html(strategy_df)
     if not input_df.empty and not signals_df.empty:
-        recent_signal_chart_html = _make_recent_signal_chart_html(input_df, signals_df, default_visible_days=756)
-    if not input_df.empty and not signals_df.empty and not signal_points_state_df.empty:
-        event_score_stats = _event_score_forward_stats(
-            input_df=input_df,
-            signals_df=signals_df,
-            status_df=signal_points_state_df,
-            rule_summary_df=rule_summary_df,
-            current_scores=advisor.get("scores", {}),
+        effective_signals_df, effective_signal_meta = _filter_effective_signals_expanding(input_df, signals_df)
+        recent_signal_chart_html = _make_recent_signal_chart_html(input_df, effective_signals_df, default_visible_days=756)
+        recent_signal_chart_html = recent_signal_chart_html.replace(
+            "全历史信号触发：默认显示最近3年",
+            "有效信号触发：1年后 expanding 筛选，默认显示最近3年",
         )
+    else:
+        effective_signals_df = signals_df.iloc[0:0].copy()
 
     rule_pair_cards: list[dict[str, Any]] = []
     if not rule_best_summary_df.empty:
@@ -610,7 +770,6 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
     conclusion_color = {"偏多": "#2ecc71", "降仓": "#e74c3c", "减仓": "#e74c3c", "中性": "#f39c12", "观望": "#95a5a6"}.get(conclusion, "#95a5a6")
     bullish_structure, bearish_structure = _signal_structure_tables(advisor)
 
-    signal_path = results_dir / "signals" / "signals.csv"
     return {
         "title": report_title,
         "latest": advisor.get("latest_date"),
@@ -624,11 +783,11 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         "total_sig": total_sig,
         "bullish_pct": bullish_pct,
         "bearish_pct": bearish_pct,
-        "signal_info": _signal_counts(signal_path, 20),
+        "signal_info": _signal_counts_from_df(effective_signals_df, 20),
+        "effective_signal_meta": effective_signal_meta,
         "recent_signal_chart_html": recent_signal_chart_html,
         "strategy_status": strategy_status,
         "strategy_z20_stats": strategy_z20_stats,
-        "event_score_stats": event_score_stats,
         "strategy_plot_html": strategy_plot_html,
         "strategy_z20_html": strategy_z20_html,
         "rule_pair_cards": rule_pair_cards,
@@ -977,7 +1136,6 @@ def render_html(v: dict[str, Any]) -> str:
     bearish_rows = _render_structure_rows(v.get("bearish_structure", []), "bearish_reason_bucket")
     strategy_status_html = _render_strategy_status(v.get("strategy_status", {}))
     z20_stats_html = _render_z20_stats(v.get("strategy_z20_stats", []))
-    event_score_stats_html = _render_event_score_stats(v.get("event_score_stats", []))
     rule_pair_signal_overview_html = _render_rule_pair_signal_overview(v.get("rule_pair_signal_overview", {}))
     status = v.get("strategy_status", {}) or {}
     score_position_label = str(status.get("position_label", "--") or "--")
@@ -996,6 +1154,10 @@ def render_html(v: dict[str, Any]) -> str:
     rule_bearish_count = int(rule_overview.get("bearish_count", 0) or 0)
     rule_latest_bullish = (rule_overview.get("bullish") or [{}])[0].get("base_factor", "--")
     rule_latest_bearish = (rule_overview.get("bearish") or [{}])[0].get("base_factor", "--")
+    event_daily = v.get("signal_info", {}).get("daily", []) or []
+    event_recent_open = int(sum(int(row.get("open", 0) or 0) for row in event_daily))
+    event_recent_close = int(sum(int(row.get("close", 0) or 0) for row in event_daily))
+    event_recent_net = event_recent_open - event_recent_close
 
     daily_rows = "".join(
         f"<tr><td>{_escape(r['date'])}</td><td>{int(r['open'])}</td><td>{int(r['close'])}</td><td>{int(r['factors'])}</td></tr>"
@@ -1010,29 +1172,14 @@ def render_html(v: dict[str, Any]) -> str:
 </div>
 """
 
-    event_conclusion_html = f"""
-    <div class="card">
-      <h2>事件驱动结论解释</h2>
-      <div class="interpretation">
-        <p><b>事件驱动结论</b>：系统判定为 <span class="keyword-pill pill-core">{_escape(v['conclusion'])}</span>，core_score = <span class="keyword-pill pill-core">{core_score:.3f}</span>。</p>
-        <div class="calc-note">
-          <p><b>计算口径</b>：先把所有因子的开仓、平仓规则转成事件信号，并根据最新仍在有效期内的事件状态判断当前是多、空还是观望。</p>
-          <p><b>单点打分</b>：每个信号点再按因子默认方向和历史 rule_pair 表现，折算成看多、看空、风险缓和或待确认；随后乘以因子类别权重、周期权重和历史规则表现修正，得到单点得分。</p>
-          <p><b>总评分</b> = 全部单点得分加总 / 全部可解释点位权重绝对值加总，当前为 <span class="keyword-pill pill-core">{total_score:.3f}</span>；<b>核心评分</b> 只统计赔率/估值、赔率/筹码、胜率/量、胜率/资金四类核心因子，当前为 <span class="keyword-pill pill-core">{core_score:.3f}</span>。</p>
-          <p><b>可解释占比</b> = 可被方向规则折算的点位数量 / 全部信号点数量，当前为 <span class="keyword-pill pill-core">{interpretable_ratio:.1f}%</span>。结论阈值固定：可解释占比低于35%或总评分接近0时观望；总评分不低于0.20且核心评分不低于0.10时偏多；总评分不高于-0.20或核心评分不高于-0.20时降仓。</p>
-        </div>
-        {event_score_stats_html}
-      </div>
-    </div>
-"""
-
     recent_signal_card_html = f"""
     <div class="card">
-      <h2>最近 20 日信号触发 <span class="badge">{int(v['signal_info'].get('total_recent', 0))} 条开仓</span></h2>
+      <h2>有效信号数量 <span class="badge">近20日 {int(v['signal_info'].get('total_recent', 0))} 条开仓</span></h2>
       <div class="plot-container">
         <div class="plotly-wrap">{v['recent_signal_chart_html']}</div>
       </div>
-      <p class="footnote">数量口径：以 signals.csv 为来源，按交易日聚合事件条数；signal = 1 计入开仓数量，signal = -1 计入平仓数量，净开仓量 = 开仓数量 - 平仓数量。同一交易日多个因子或规则同时触发会分别计数。图中传入全历史交易日数据，打开时默认显示最近 3 年约 756 个交易日；未触发信号的交易日数量记为 0。图中展示净开仓量、开仓数量和平仓数量的 5 日均线，hover 中保留当日原始数量。</p>
+      <p class="signal-explain">净开仓量 = 当日有效开仓信号数 - 当日有效平仓信号数，用来看当天<span class="red-note">新增</span>多空信号谁更强；近20日累计净开仓 = 最近20个交易日有效开仓合计 - 有效平仓合计，用来看<span class="red-note">一段时间</span>内多头信号是否持续占优。</p>
+      <p class="footnote">数量口径：以 signals.csv 为来源，只统计经过历史有效性筛选的信号。筛选方式为：满 1 年历史后，对每个 instrument + factor + pattern + signal 使用截至当日前、且未来5日收益已经兑现的 expanding 历史样本；开仓信号按未来5日上涨计算胜率，平仓/看空信号按未来5日下跌计算胜率；仅保留胜率 &gt; 50% 且盈亏比 &gt; 1 的信号。第一子图为净开仓量 5 日均线，净开仓量 = 有效开仓数量 - 有效平仓数量；第二子图为近 20 个交易日累计净开仓；第三子图中蓝色线为有效开仓数量 5 日均线，红色线为有效平仓数量 5 日均线。图中传入全历史交易日数据，打开时默认显示最近 3 年约 756 个交易日；未触发有效信号的交易日数量记为 0。</p>
     </div>
 """
 
@@ -1055,13 +1202,13 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Mic
 .container{{max-width:1440px;margin:0 auto;padding:20px}}
 .overview-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:24px}}
 .overview-card{{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-top:4px solid #d0d5dd;min-height:210px;display:flex;flex-direction:column;gap:12px}}
-.overview-card.event-card{{border-top-color:{v['conclusion_color']}}}
+.overview-card.event-card{{border-top-color:#7B2CBF}}
 .overview-card.score-card{{border-top-color:#2563eb}}
 .overview-card.rule-card{{border-top-color:#7c3aed}}
 .overview-title{{display:flex;align-items:center;justify-content:space-between;gap:10px}}
 .overview-title h2{{font-size:17px;color:#101828;margin:0}}
 .overview-badge{{display:inline-block;border-radius:999px;padding:5px 13px;color:#fff;font-size:14px;font-weight:800;white-space:nowrap}}
-.overview-badge.event-badge{{background:{v['conclusion_color']}}}
+.overview-badge.event-badge{{background:#7B2CBF}}
 .overview-badge.score-badge{{background:#2563eb}}
 .overview-badge.rule-badge{{background:#7c3aed}}
 .overview-metrics{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}}
@@ -1149,6 +1296,7 @@ tr:hover{{background:#f8f9fa}}
 .score-rule-lines{{background:#fff;border:1px dashed #d0d5dd;border-radius:8px;padding:9px 12px;color:#475467}}
 .score-stat-table th,.score-stat-table td{{white-space:nowrap}}
 .sample-note{{font-size:11px;color:#667085;margin-left:4px}}
+.signal-explain{{font-size:12.5px;color:#344054;line-height:1.7;margin:10px 0 0 0}}
 .tab-bar{{display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid #e0e0e0}}
 .tab-btn{{padding:8px 20px;cursor:pointer;border:none;background:transparent;font-size:14px;color:#666;border-bottom:2px solid transparent;margin-bottom:-2px}}
 .tab-btn:hover{{color:#333}}
@@ -1163,6 +1311,10 @@ tr:hover{{background:#f8f9fa}}
 .calc-note p{{margin-bottom:6px}}
 .calc-note p:last-child{{margin-bottom:0}}
 .calc-note b{{color:#1f2937}}
+.analysis-summary{{background:#fbfcff;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;font-size:13px;line-height:1.7;color:#344054}}
+.analysis-summary p{{margin-bottom:8px}}
+.analysis-summary ul{{margin-left:18px;margin-bottom:0}}
+.analysis-summary li{{margin-bottom:5px}}
 .strategy-label{{font-size:14px;color:#555;margin-bottom:8px;text-align:center;font-weight:600}}
 .event-module{{margin:24px 0}}
 .module-heading{{display:none}}
@@ -1207,18 +1359,17 @@ tr:hover{{background:#f8f9fa}}
     <div class="overview-card event-card">
       <div class="overview-title">
         <h2>事件驱动</h2>
-        <span class="overview-badge event-badge">{_escape(v['conclusion'])}</span>
+        <span class="overview-badge event-badge">有效信号</span>
       </div>
       <div class="overview-metrics">
-        <div class="overview-metric"><b>{core_score:.2f}</b><span>核心评分</span></div>
-        <div class="overview-metric"><b>{total_score:.2f}</b><span>总评分</span></div>
-        <div class="overview-metric"><b>{interpretable_ratio:.0f}%</b><span>可解释占比</span></div>
+        <div class="overview-metric"><b>{event_recent_open}</b><span>近20日开仓</span></div>
+        <div class="overview-metric"><b>{event_recent_close}</b><span>近20日平仓</span></div>
+        <div class="overview-metric"><b>{event_recent_net}</b><span>净开仓</span></div>
       </div>
       <div class="overview-note">
-        基于 <span class="keyword-pill pill-core">{v['total_sig']} 个信号点</span>
-        <span class="keyword-pill pill-bullish">多 {bullish_count}</span>
-        <span class="keyword-pill pill-bearish">空 {bearish_count}</span>
-        <span class="keyword-pill pill-watch">观望 {watch_count}</span>
+        <span class="keyword-pill pill-core">1年后 expanding 筛选</span>
+        <span class="keyword-pill pill-bullish">胜率 &gt; 50%</span>
+        <span class="keyword-pill pill-bearish">盈亏比 &gt; 1</span>
       </div>
     </div>
     <div class="overview-card score-card">
@@ -1262,53 +1413,8 @@ tr:hover{{background:#f8f9fa}}
 
   <div id="event-module-panel" class="module-panel active event-module">
     <h2 class="module-heading">事件驱动模块</h2>
-    <p class="module-intro">事件驱动模块从每个因子的开仓、平仓事件出发，统计当前市场中看多、看空和观望信号的分布。它不直接给出最终仓位，而是回答最近哪些类型的因子正在触发交易事件、这些事件偏向抄底还是风险释放、不同证据之间是否一致。适合用来解释当下择时观点的来源和结构。</p>
-    {event_conclusion_html}
+    <p class="module-intro">事件驱动模块只展示经过历史有效性筛选后的信号数量。筛选使用 1 年后 expanding 历史样本，开仓信号按未来5日上涨检验，平仓/看空信号按未来5日下跌检验，仅保留胜率大于50%且盈亏比大于1的信号。</p>
     {recent_signal_card_html}
-
-    <div class="card">
-      <h2>分析证据</h2>
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr><th>类别</th><th>看多</th><th>看空</th><th>风险缓和</th><th>待确认</th><th>中性</th><th>净得分</th><th>主证据</th></tr></thead>
-          <tbody>{evidence_rows}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>信号分布概览</h2>
-      <div class="signal-stats">
-        <div class="signal-pie"></div>
-        <div class="signal-legend">
-          <div class="legend-item"><div class="legend-dot" style="background:#2ecc71"></div>看多 <span class="legend-pct">{v['bullish_pct']:.1f}% ({int(sc.get('多', 0))})</span></div>
-          <div class="legend-item"><div class="legend-dot" style="background:#e74c3c"></div>看空 <span class="legend-pct">{v['bearish_pct']:.1f}% ({int(sc.get('空', 0))})</span></div>
-          <div class="legend-item"><div class="legend-dot" style="background:#95a5a5"></div>观望 <span class="legend-pct">{nw_pct:.1f}% ({int(sc.get('观望', 0))})</span></div>
-        </div>
-      </div>
-      <h3 style="margin-top:20px;font-size:14px;color:#555;">因子类别净得分分布</h3>
-      <div class="cat-bar-container">{category_bars}</div>
-    </div>
-
-    <div class="card">
-      <h2>看多信号结构</h2>
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr><th>类型</th><th>数量</th><th>占比</th><th>分值合计</th><th>核心开仓</th><th>辅助观察</th></tr></thead>
-          <tbody>{bullish_rows}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>看空信号结构</h2>
-      <div style="overflow-x:auto;">
-        <table>
-          <thead><tr><th>类型</th><th>数量</th><th>占比</th><th>分值合计</th><th>核心平仓</th><th>辅助观察</th></tr></thead>
-          <tbody>{bearish_rows}</tbody>
-        </table>
-      </div>
-    </div>
 
   </div>
 

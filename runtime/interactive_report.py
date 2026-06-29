@@ -190,16 +190,17 @@ def _make_recent_signal_chart_html(
     chart_df["net_open_count_ma5"] = chart_df["net_open_count"].rolling(5, min_periods=1).mean()
     chart_df["open_count_ma5"] = chart_df["open_count"].rolling(5, min_periods=1).mean()
     chart_df["close_count_ma5"] = chart_df["close_count"].rolling(5, min_periods=1).mean()
+    chart_df["net_open_count_sum20"] = chart_df["net_open_count"].rolling(20, min_periods=1).sum()
     visible_start_idx = max(0, len(chart_df) - default_visible_days)
     visible_range = [chart_df["plot_date"].iloc[visible_start_idx], chart_df["plot_date"].iloc[-1]]
 
     fig = make_subplots(
-        rows=2,
+        rows=3,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_heights=[0.56, 0.44],
-        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
+        vertical_spacing=0.07,
+        row_heights=[0.38, 0.30, 0.32],
+        specs=[[{"secondary_y": True}], [{"secondary_y": True}], [{"secondary_y": True}]],
     )
     fig.add_trace(
         go.Scatter(
@@ -218,6 +219,23 @@ def _make_recent_signal_chart_html(
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
+            y=chart_df["net_open_count_sum20"],
+            name="近20日累计净开仓",
+            mode="lines",
+            line=dict(color="#F59E0B", width=1.9),
+            customdata=np.stack(
+                [chart_df["net_open_count_sum20"].values, chart_df["net_open_count"].values, chart_df["open_count"].values, chart_df["close_count"].values],
+                axis=1,
+            ),
+            hovertemplate="%{x|%Y-%m-%d}<br>近20日累计净开仓=%{customdata[0]:.0f}<br>当日净开仓=%{customdata[1]:.0f}<br>当日开仓=%{customdata[2]:.0f}<br>当日平仓=%{customdata[3]:.0f}<extra></extra>",
+        ),
+        row=2,
+        col=1,
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df["plot_date"],
             y=chart_df["close_price"],
             name="收盘价",
             mode="lines",
@@ -229,6 +247,22 @@ def _make_recent_signal_chart_html(
         col=1,
         secondary_y=True,
     )
+    for row in (2, 3):
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df["plot_date"],
+                y=chart_df["close_price"],
+                name="收盘价",
+                mode="lines",
+                line=dict(color="#FF8080", width=1.2, dash="dash"),
+                opacity=0.82,
+                showlegend=False,
+                hovertemplate="%{x|%Y-%m-%d}<br>收盘价=%{y:.2f}<extra></extra>",
+            ),
+            row=row,
+            col=1,
+            secondary_y=True,
+        )
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
@@ -239,8 +273,9 @@ def _make_recent_signal_chart_html(
             customdata=np.stack([chart_df["open_count"].values], axis=1),
             hovertemplate="%{x|%Y-%m-%d}<br>开仓数量5日均线=%{y:.2f}<br>当日开仓数量=%{customdata[0]:.0f}<extra></extra>",
         ),
-        row=2,
+        row=3,
         col=1,
+        secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(
@@ -252,14 +287,15 @@ def _make_recent_signal_chart_html(
             customdata=np.stack([chart_df["close_count"].values], axis=1),
             hovertemplate="%{x|%Y-%m-%d}<br>平仓数量5日均线=%{y:.2f}<br>当日平仓数量=%{customdata[0]:.0f}<extra></extra>",
         ),
-        row=2,
+        row=3,
         col=1,
+        secondary_y=False,
     )
     fig.add_hline(y=0.0, line_width=0.8, line_dash="dot", line_color="#777777", row=1, col=1)
     fig.update_layout(
         template="plotly_white",
-        height=560,
-        margin=dict(l=50, r=45, t=28, b=38),
+        height=720,
+        margin=dict(l=58, r=45, t=28, b=38),
         font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12),
         hoverlabel=dict(font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)),
         hovermode="x unified",
@@ -267,12 +303,15 @@ def _make_recent_signal_chart_html(
     )
     fig.update_yaxes(title_text="净开仓量 5日均线", row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="收盘价", row=1, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="开仓 / 平仓数量 5日均线", row=2, col=1)
+    fig.update_yaxes(title_text="近20日累计净开仓", row=2, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="收盘价", row=2, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="开仓 / 平仓数量 5日均线", row=3, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="收盘价", row=3, col=1, secondary_y=True)
     fig.update_xaxes(range=visible_range)
     return (
         "<div class='recent-signal-figures'>"
         "<div class='plot-panel'><div class='plot-panel-title'>全历史信号触发：默认显示最近3年</div>"
-        f"{_fig_html(fig, height=560)}"
+        f"{_fig_html(fig, height=720)}"
         "</div>"
         "</div>"
     )
