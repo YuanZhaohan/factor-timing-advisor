@@ -768,7 +768,7 @@ def plot_best_rule(
     z20_df["entry_z_20_3"] = entry_z_20_3
     z20_df["exit_z_20_3"] = exit_z_20_3
 
-    z20_df = z20_df.tail(750).reset_index(drop=True)
+    z20_df = z20_df.reset_index(drop=True)
 
     z_fig, (z_ax1, z_ax2) = plt.subplots(
         2, 1, figsize=(18, 8), sharex=True,
@@ -793,7 +793,7 @@ def plot_best_rule(
     z_ax2_r.set_ylabel("收盘价", fontsize=11)
 
     z_fig.suptitle(
-        f"{df[CODE_COL].iloc[0]} {df[NAME_COL].iloc[0] if not df[NAME_COL].isna().all() else ''}\n20日 ZScore + 3日 MA 得分图（最近750交易日）",
+        f"{df[CODE_COL].iloc[0]} {df[NAME_COL].iloc[0] if not df[NAME_COL].isna().all() else ''}\n20日 ZScore + 3日 MA 得分图（全历史）",
         fontsize=13,
         fontweight="bold",
     )

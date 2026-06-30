@@ -967,7 +967,9 @@ def _make_score_z20_fig(strategy_df: pd.DataFrame) -> go.Figure:
     z20_df = df[[DATE_COL, PRICE_COL]].copy()
     z20_df["entry_z_20_3"] = rolling_zscore(df["entry_score"], 20).rolling(3, min_periods=1).mean()
     z20_df["exit_z_20_3"] = rolling_zscore(df["exit_score"], 20).rolling(3, min_periods=1).mean()
-    z20_df = z20_df.tail(750).reset_index(drop=True)
+    z20_df = z20_df.reset_index(drop=True)
+    visible_start_idx = max(0, len(z20_df) - 750)
+    visible_range = [z20_df[DATE_COL].iloc[visible_start_idx], z20_df[DATE_COL].iloc[-1]]
 
     fig = make_subplots(
         rows=2,
@@ -1038,7 +1040,7 @@ def _make_score_z20_fig(strategy_df: pd.DataFrame) -> go.Figure:
         margin=dict(l=45, r=35, t=80, b=35),
         font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12),
         hoverlabel=dict(font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)),
-        title=dict(text="最近750个交易日得分时序", x=0.5, xanchor="center", font=dict(size=16)),
+        title=dict(text="全历史得分时序（默认显示最近约3年）", x=0.5, xanchor="center", font=dict(size=16)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=12)),
         hovermode="x unified",
     )
@@ -1046,6 +1048,7 @@ def _make_score_z20_fig(strategy_df: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="收盘价", row=1, col=1, secondary_y=True)
     fig.update_yaxes(title_text="得分", row=2, col=1, secondary_y=False)
     fig.update_yaxes(title_text="收盘价", row=2, col=1, secondary_y=True)
+    fig.update_xaxes(range=visible_range)
     return fig
 
 
@@ -1060,7 +1063,9 @@ def _make_score_z20_html(strategy_df: pd.DataFrame) -> str:
     z20_df = df[[DATE_COL, PRICE_COL]].copy()
     z20_df["entry_z_20_3"] = rolling_zscore(df["entry_score"], 20).rolling(3, min_periods=1).mean()
     z20_df["exit_z_20_3"] = rolling_zscore(df["exit_score"], 20).rolling(3, min_periods=1).mean()
-    z20_df = z20_df.tail(750).reset_index(drop=True)
+    z20_df = z20_df.reset_index(drop=True)
+    visible_start_idx = max(0, len(z20_df) - 750)
+    visible_range = [z20_df[DATE_COL].iloc[visible_start_idx], z20_df[DATE_COL].iloc[-1]]
 
     font = dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)
     hover_font = dict(font=font)
@@ -1102,16 +1107,17 @@ def _make_score_z20_html(strategy_df: pd.DataFrame) -> str:
         )
         fig.update_yaxes(title_text="得分", secondary_y=False)
         fig.update_yaxes(title_text="收盘价", secondary_y=True)
+        fig.update_xaxes(range=visible_range)
         return fig
 
     entry_fig = make_one("entry_z_20_3", "抄底得分 (20Z+3MA)", "#D62728")
     exit_fig = make_one("exit_z_20_3", "逃顶得分 (20Z+3MA)", "#2CA02C")
     return (
         "<div class='score-z20-figures'>"
-        "<div class='plot-panel'><div class='plot-panel-title'>1. 抄底得分 20日Z值 + 3日均线（最近750个交易日）</div>"
+        "<div class='plot-panel'><div class='plot-panel-title'>1. 抄底得分 20日Z值 + 3日均线（全历史，默认显示最近约3年）</div>"
         f"{_fig_html(entry_fig, height=340)}"
         "</div>"
-        "<div class='plot-panel'><div class='plot-panel-title'>2. 逃顶得分 20日Z值 + 3日均线（最近750个交易日）</div>"
+        "<div class='plot-panel'><div class='plot-panel-title'>2. 逃顶得分 20日Z值 + 3日均线（全历史，默认显示最近约3年）</div>"
         f"{_fig_html(exit_fig, height=340)}"
         "</div>"
         "</div>"
