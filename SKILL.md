@@ -36,7 +36,7 @@ workspace/runs/default/
 
 ### 0. 拉取最新数据（每次运行前必做）
 
-运行前先从 GitHub 拉取最新的 `宽基得分.csv`，确保数据目录已同步：
+运行前先从 GitHub 检查skill是否更新运行的脚本，保证版本统一，然后再从 GitHub 拉取最新的 `宽基得分.csv`，确保数据目录已同步：
 
 ```bash
 git pull origin main

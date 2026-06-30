@@ -1053,8 +1053,20 @@ def _render_rule_filter(v: dict[str, Any]) -> str:
     )
 
 
+def _render_rule_search(v: dict[str, Any]) -> str:
+    total = len(v["rule_pair_cards"])
+    return f"""
+<div class="rule-search-bar">
+  <input id="rule-search-input" type="search" placeholder="搜索因子名、类别、开仓规则、平仓规则..." oninput="updateRulePairSearch()" />
+  <span id="rule-search-summary">显示 {total} / {total}</span>
+</div>
+"""
+
+
 def _render_rule_pair_cards(v: dict[str, Any]) -> str:
-    cards = []
+    groups: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
+    sub_counts: dict[str, dict[str, int]] = {}
     for rp in v["rule_pair_cards"]:
         desc = rp["desc"] or {}
         category = str(desc.get("category", "") or "")
@@ -1082,8 +1094,21 @@ def _render_rule_pair_cards(v: dict[str, Any]) -> str:
             f"<div><b>平仓规则：</b>{_escape(close_rule)}</div>"
             "</div>"
         )
-        cards.append(
-            f"<div class='rule-pair-card' data-category-root='{_escape(category_root)}' data-category='{_escape(category)}'>"
+        search_text = " ".join(
+            [
+                str(rp.get("factor", "")),
+                category,
+                category_root,
+                str(desc.get("meaning", "")),
+                str(desc.get("direction", "")),
+                str(desc.get("observation", "")),
+                str(desc.get("note", "")),
+                open_rule,
+                close_rule,
+            ]
+        ).lower()
+        card = (
+            f"<div class='rule-pair-card' data-category-root='{_escape(category_root)}' data-category='{_escape(category)}' data-search='{_escape(search_text)}'>"
             "<div class='rule-pair-header'>"
             f"<h3>{_escape(rp['factor'])}</h3>"
             f"{meta}{rule_lines}{''.join(extra)}"
@@ -1091,7 +1116,43 @@ def _render_rule_pair_cards(v: dict[str, Any]) -> str:
             f"{rp['chart_html']}"
             "</div>"
         )
-    return "".join(cards)
+        groups.setdefault(category_root, []).append(card)
+        counts[category_root] = counts.get(category_root, 0) + 1
+        sub_counts.setdefault(category_root, {})
+        sub_counts[category_root][category] = sub_counts[category_root].get(category, 0) + 1
+
+    preferred = ["胜率", "赔率", "辅助", "其他"]
+    roots = [root for root in preferred if root in groups] + sorted(root for root in groups if root not in preferred)
+    sections = []
+    for root in roots:
+        total = counts[root]
+        sub_options = []
+        for sub_category, sub_total in sorted(sub_counts.get(root, {}).items()):
+            label = sub_category or root
+            sub_options.append(
+                "<label class='rule-sub-filter'>"
+                f"<input type='checkbox' class='rule-sub-category-check' data-root='{_escape(root)}' value='{_escape(sub_category)}' checked onchange='updateRulePairSearch()'>"
+                f"<span>{_escape(label)}</span><em>{sub_total}</em>"
+                "</label>"
+            )
+        sub_filter_html = (
+            "<div class='rule-sub-filter-row'>"
+            "<label class='rule-sub-filter rule-sub-filter-all'>"
+            f"<input type='checkbox' class='rule-sub-category-all' data-root='{_escape(root)}' checked onchange='toggleRuleSubCategory(this)'>"
+            "<span>全部</span>"
+            f"<em>{total}</em>"
+            "</label>"
+            f"{''.join(sub_options)}"
+            "</div>"
+        )
+        sections.append(
+            f"<details class='rule-category-section' data-category-root='{_escape(root)}' open>"
+            f"<summary><span>{_escape(root)}</span><em class='rule-category-count' data-total='{total}'>{total} / {total}</em></summary>"
+            f"{sub_filter_html}"
+            f"<div class='rule-pair-grid'>{''.join(groups[root])}</div>"
+            "</details>"
+        )
+    return "".join(sections)
 
 
 def render_html(v: dict[str, Any]) -> str:
@@ -1130,7 +1191,7 @@ def render_html(v: dict[str, Any]) -> str:
     cat_interp = "".join(cat_interp_parts)
     evidence_rows = _render_evidence_rows(v)
     category_bars = _render_category_bars(v)
-    rule_filter = _render_rule_filter(v)
+    rule_search = _render_rule_search(v)
     rule_pair_cards = _render_rule_pair_cards(v)
     bullish_rows = _render_structure_rows(v.get("bullish_structure", []), "signal_style_bucket")
     bearish_rows = _render_structure_rows(v.get("bearish_structure", []), "bearish_reason_bucket")
@@ -1279,6 +1340,21 @@ tr:hover{{background:#f8f9fa}}
 .rule-filter-option span{{flex:1}}
 .rule-filter-option em{{font-style:normal;color:#667085;font-size:12px}}
 .rule-filter-all{{border-bottom:1px solid #eef2f7;margin-bottom:4px;padding-bottom:9px;font-weight:700}}
+.rule-search-bar{{display:flex;align-items:center;gap:12px;margin:12px 0 16px 0;flex-wrap:wrap}}
+.rule-search-bar input{{flex:1;min-width:260px;border:1px solid #d9dde7;background:#fff;border-radius:8px;padding:10px 12px;font-size:13px;color:#344054;outline:none}}
+.rule-search-bar input:focus{{border-color:#94a3b8;box-shadow:0 0 0 3px rgba(148,163,184,.18)}}
+.rule-search-bar span{{font-size:12.5px;color:#667085;white-space:nowrap}}
+.rule-category-section{{border:1px solid #e5e7eb;border-radius:10px;background:#fff;margin-bottom:16px;overflow:hidden}}
+.rule-category-section.hidden{{display:none}}
+.rule-category-section summary{{cursor:pointer;list-style:none;background:#f8fafc;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;font-size:14px;font-weight:800;color:#1f2937;border-bottom:1px solid #e5e7eb}}
+.rule-category-section summary::-webkit-details-marker{{display:none}}
+.rule-category-section summary em{{font-style:normal;font-size:12px;color:#667085;background:#eef2f7;border-radius:999px;padding:2px 9px}}
+.rule-category-section .rule-pair-grid{{padding:16px}}
+.rule-sub-filter-row{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid #eef2f7;background:#fff}}
+.rule-sub-filter{{display:inline-flex;align-items:center;gap:6px;border:1px solid #d9dde7;border-radius:999px;padding:5px 9px;font-size:12px;color:#344054;background:#f8fafc;cursor:pointer;user-select:none}}
+.rule-sub-filter input{{width:13px;height:13px}}
+.rule-sub-filter em{{font-style:normal;color:#667085;font-size:11px}}
+.rule-sub-filter-all{{font-weight:800;background:#eef2f7}}
 .factor-meta{{font-size:12px;margin-bottom:6px;display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}}
 .factor-cat{{display:inline-block;color:#fff;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}}
 .factor-meaning{{color:#333;font-size:12.5px;line-height:1.5}}
@@ -1443,7 +1519,7 @@ tr:hover{{background:#f8f9fa}}
   <div class="card">
     <h2>各 base 指标最优规则组合回测 <span class="badge">{len(v['rule_pair_cards'])} 个因子</span></h2>
     <p style="font-size:13px;color:#666;margin-bottom:16px;">保持原有内容结构，只把时序图改成可交互图。悬停可以查看每个时间点的具体数值。</p>
-    {rule_filter}
+    {rule_search}
     <div class="rule-pair-grid">{rule_pair_cards}</div>
   </div>
   </div>
@@ -1471,35 +1547,52 @@ function switchTab(e,t) {{
   document.getElementById(t).classList.add('active');
   e.target.classList.add('active');
 }}
-function toggleAllRuleCategories(box) {{
-  document.querySelectorAll('.rule-category-check').forEach(function(el) {{
+function toggleRuleSubCategory(box) {{
+  var root = box.dataset.root || '';
+  document.querySelectorAll('.rule-sub-category-check[data-root="' + root + '"]').forEach(function(el) {{
     el.checked = box.checked;
   }});
-  updateRulePairFilter();
+  updateRulePairSearch();
 }}
-function updateRulePairFilter() {{
-  var boxes = Array.from(document.querySelectorAll('.rule-category-check'));
-  var selected = boxes.filter(function(el) {{ return el.checked; }}).map(function(el) {{ return el.value; }});
-  var allBox = document.getElementById('rule-filter-all');
-  if (allBox) {{
-    allBox.checked = selected.length === boxes.length;
-  }}
-  var selectedSet = new Set(selected);
+function updateRulePairSearch() {{
+  var input = document.getElementById('rule-search-input');
+  var query = input ? input.value.trim().toLowerCase() : '';
+  var total = 0;
   var visible = 0;
-  document.querySelectorAll('.rule-pair-card').forEach(function(card) {{
-    var show = selectedSet.has(card.dataset.categoryRoot || '其他');
-    card.classList.toggle('hidden', !show);
-    if (show) {{ visible += 1; }}
-  }});
-  var summary = document.getElementById('rule-filter-summary');
-  if (summary) {{
-    if (selected.length === boxes.length) {{
-      summary.textContent = '全部 ' + visible;
-    }} else if (selected.length === 0) {{
-      summary.textContent = '未选择';
-    }} else {{
-      summary.textContent = selected.join('、') + ' ' + visible;
+  document.querySelectorAll('.rule-category-section').forEach(function(section) {{
+    var sectionVisible = 0;
+    var sectionTotal = 0;
+    var root = section.dataset.categoryRoot || '';
+    var checks = Array.from(section.querySelectorAll('.rule-sub-category-check'));
+    var selectedCategories = checks.filter(function(el) {{ return el.checked; }}).map(function(el) {{ return el.value || ''; }});
+    var selectedSet = new Set(selectedCategories);
+    var allBox = section.querySelector('.rule-sub-category-all');
+    if (allBox) {{
+      allBox.checked = selectedCategories.length === checks.length;
     }}
+    section.querySelectorAll('.rule-pair-card').forEach(function(card) {{
+      sectionTotal += 1;
+      total += 1;
+      var text = (card.dataset.search || card.textContent || '').toLowerCase();
+      var category = card.dataset.category || '';
+      var categoryMatch = selectedSet.has(category);
+      var searchMatch = !query || text.indexOf(query) >= 0;
+      var show = categoryMatch && searchMatch;
+      card.classList.toggle('hidden', !show);
+      if (show) {{
+        sectionVisible += 1;
+        visible += 1;
+      }}
+    }});
+    section.classList.toggle('hidden', sectionVisible === 0);
+    var count = section.querySelector('.rule-category-count');
+    if (count) {{
+      count.textContent = sectionVisible + ' / ' + sectionTotal;
+    }}
+  }});
+  var summary = document.getElementById('rule-search-summary');
+  if (summary) {{
+    summary.textContent = '显示 ' + visible + ' / ' + total;
   }}
   setTimeout(function() {{
     document.querySelectorAll('#rule-module-panel .rule-pair-card:not(.hidden) .plotly-graph-div').forEach(function(el) {{
@@ -1507,7 +1600,7 @@ function updateRulePairFilter() {{
     }});
   }}, 80);
 }}
-document.addEventListener('DOMContentLoaded', updateRulePairFilter);
+document.addEventListener('DOMContentLoaded', updateRulePairSearch);
 </script>
 </body>
 </html>"""
