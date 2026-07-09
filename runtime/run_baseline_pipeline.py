@@ -22,6 +22,7 @@ from role_strategy import (
     strategy_vote_summary,
     update_monthly_refresh_daily_score_incremental,
 )
+from selected_single_factor_rules import run_selected_single_factor_rules
 from signal_generation import save_signal_table
 from baseline_score_strategy import backtest_z_rules, build_all_z_rules, plot_best_rule
 from io_utils import read_run_table, read_table, resolve_table_file, write_table
@@ -175,14 +176,16 @@ def run_daily_refresh_pipeline(
     report_top_n: int = 30,
     lookback_days: int = 252 * 3,
     save_intermediates: bool = True,
+    refresh_rule_pair: bool = False,
 ) -> dict[str, int]:
     """Daily refresh path:
     - refresh input snapshot
     - refresh signals
     - refresh event-study outputs
     - incrementally refresh daily score
-    - refresh only the best rule-pair for each base factor
+    - optionally refresh only the best rule-pair for each base factor
     - refresh baseline strategy outputs
+    - refresh selected single-factor rules
     - refresh advisor report outputs
     - refresh plots
     """
@@ -211,25 +214,30 @@ def run_daily_refresh_pipeline(
         save_intermediates=save_intermediates,
     )
 
-    reference_rule_summary_path = _resolve_run_file(
-        output_dir,
-        [
-            "results/rule_pair/rule_pair_summary.csv",
-            "rule_pair_summary.csv",
-        ],
-    )
-    reference_rule_summary = read_table(reference_rule_summary_path)
-    rule_summary, equity_curves = run_best_rule_pair_backtest(
-        df=df,
-        reference_rule_summary=reference_rule_summary,
-        output_dir=dirs["rule_pair"],
-        signal_table=signal_table,
-    )
+    if refresh_rule_pair:
+        reference_rule_summary_path = _resolve_run_file(
+            output_dir,
+            [
+                "results/rule_pair/rule_pair_summary.csv",
+                "rule_pair_summary.csv",
+            ],
+        )
+        reference_rule_summary = read_table(reference_rule_summary_path)
+        rule_summary, equity_curves = run_best_rule_pair_backtest(
+            df=df,
+            reference_rule_summary=reference_rule_summary,
+            output_dir=dirs["rule_pair"],
+            signal_table=signal_table,
+        )
+    else:
+        rule_summary = pd.DataFrame()
+        equity_curves = pd.DataFrame()
     summary, best_equity = run_baseline_strategy(
         input_dir=output_dir,
         output_dir=output_dir,
         score_suffix=score_suffix,
     )
+    selected_rule_stats = run_selected_single_factor_rules(input_dir=output_dir, output_dir=output_dir)
     advisor_summary, scored, report = run_reporting_pipeline(
         input_dir=output_dir,
         output_dir=None,
@@ -248,10 +256,12 @@ def run_daily_refresh_pipeline(
         "trade_summary_rows": len(trade_summary),
         "utility_rows": len(utility),
         "daily_score_rows": len(daily_score),
+        "rule_pair_refreshed": int(refresh_rule_pair),
         "best_rule_pair_rows": len(rule_summary),
         "equity_curve_rows": len(equity_curves),
         "strategy_summary_rows": len(summary),
         "best_equity_rows": len(best_equity),
+        **selected_rule_stats,
         "advisor_scored_rows": len(scored),
         "plot_count": len(manifest),
     }
@@ -450,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument("--output-dir", default="results_score_event_full_monthly")
     strategy.add_argument("--score-suffix", default="default")
 
-    score_update = subparsers.add_parser("score-update", help="Daily refresh: update signals, events, best rule-pair per base, score strategy, report, and plots.")
+    score_update = subparsers.add_parser("score-update", help="Daily refresh: update signals, events, score strategy, selected rules, report, and plots; skip rule-pair refresh by default.")
     score_update.add_argument("--csv", default="data/宽基得分.csv")
     score_update.add_argument("--output-dir", default="results_score_event_full_monthly")
     score_update.add_argument("--warmup-years", type=int, default=3)
@@ -462,6 +472,7 @@ def build_parser() -> argparse.ArgumentParser:
     score_update.add_argument("--report-top-n", type=int, default=30)
     score_update.add_argument("--lookback-days", type=int, default=252 * 3)
     score_update.add_argument("--save-intermediates", action="store_true", default=True)
+    score_update.add_argument("--refresh-rule-pair", action="store_true", help="Also refresh best rule-pair outputs during daily update.")
 
     plot = subparsers.add_parser("plot", help="Plot each factor with its best rule_pair buy/sell marks.")
     plot.add_argument("--input-dir", default="results_score_event_full_monthly")
@@ -474,6 +485,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--input-dir", default="results_score_event_full_monthly")
     report.add_argument("--output-dir", default=None)
     report.add_argument("--report-top-n", type=int, default=30)
+
+    selected_rules = subparsers.add_parser("selected-rules", help="Refresh retained selected single-factor rules from precomputed signals.")
+    selected_rules.add_argument("--input-dir", default="results_score_event_full_monthly")
+    selected_rules.add_argument("--output-dir", default=None)
 
     full = subparsers.add_parser("all", help="Run upstream pipeline, strategy, report, and plot.")
     full.add_argument("--csv", default="data/宽基得分.csv")
@@ -541,6 +556,7 @@ def main() -> None:
             report_top_n=args.report_top_n,
             lookback_days=args.lookback_days,
             save_intermediates=args.save_intermediates,
+            refresh_rule_pair=args.refresh_rule_pair,
         )
         for key, value in stats.items():
             print(f"{key}={value}")
@@ -568,6 +584,15 @@ def main() -> None:
         print(f"report_chars={len(report)}")
         return
 
+    if args.command == "selected-rules":
+        stats = run_selected_single_factor_rules(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+        )
+        for key, value in stats.items():
+            print(f"{key}={value}")
+        return
+
     if args.command == "all":
         signal_table, event_summary, trade_summary, rule_summary, rule_summary_by_year_end, equity_curves, daily_score = run_upstream_pipeline(
             csv_path=args.csv,
@@ -586,6 +611,7 @@ def main() -> None:
             output_dir=args.output_dir,
             score_suffix=args.score_suffix,
         )
+        selected_rule_stats = run_selected_single_factor_rules(input_dir=args.output_dir, output_dir=args.output_dir)
         advisor_summary, scored, report = run_reporting_pipeline(
             input_dir=args.output_dir,
             output_dir=None,
@@ -607,6 +633,8 @@ def main() -> None:
         print(f"daily_score_rows={len(daily_score)}")
         print(f"strategy_summary_rows={len(summary)}")
         print(f"best_equity_rows={len(best_equity)}")
+        for key, value in selected_rule_stats.items():
+            print(f"{key}={value}")
         print(f"advisor_scored_rows={len(scored)}")
         print(f"plot_count={len(manifest)}")
         return

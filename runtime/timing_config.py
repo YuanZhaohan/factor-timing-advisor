@@ -33,6 +33,7 @@ AUXILIARY_CATEGORIES = {
     "\u8f85\u52a9/\u7b79\u7801\u7ed3\u6784",
     "\u8f85\u52a9/\u8d44\u91d1\u5206\u6b67",
     "\u8f85\u52a9/\u98ce\u9669\u72b6\u6001",
+    "\u8f85\u52a9/\u6280\u672f\u72b6\u6001",
 }
 CATEGORY_SCORE_WEIGHT = {
     "\u8d54\u7387/\u4f30\u503c": 1.15,
@@ -42,6 +43,7 @@ CATEGORY_SCORE_WEIGHT = {
     "\u8f85\u52a9/\u7b79\u7801\u7ed3\u6784": 0.60,
     "\u8f85\u52a9/\u8d44\u91d1\u5206\u6b67": 0.70,
     "\u8f85\u52a9/\u98ce\u9669\u72b6\u6001": 0.80,
+    "\u8f85\u52a9/\u6280\u672f\u72b6\u6001": 0.75,
 }
 FREQUENCY_SCORE_WEIGHT = {
     "\u539f\u59cb": 0.80,

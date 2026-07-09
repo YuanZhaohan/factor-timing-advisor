@@ -1614,14 +1614,30 @@ def _make_rule_pair_html(
     open_trades = pd.DataFrame(columns=[DATE_COL, PRICE_COL, *factor_cols])
     close_trades = pd.DataFrame(columns=[DATE_COL, PRICE_COL, *factor_cols])
     if "position" in best_equity.columns:
-        for start, end in _long_spans(best_equity):
-            fig_price.add_vrect(
-                x0=start,
-                x1=end,
-                fillcolor="rgba(246,199,199,0.28)",
-                line_width=0,
-                layer="below",
-            )
+        trade_df = best_row.attrs.get("_trade_df")
+        if isinstance(trade_df, pd.DataFrame) and not trade_df.empty and {"entry_date", "exit_date", "trade_return"}.issubset(trade_df.columns):
+            for _, trade_row in trade_df.iterrows():
+                start = pd.to_datetime(trade_row.get("entry_date"), errors="coerce")
+                end = pd.to_datetime(trade_row.get("exit_date"), errors="coerce")
+                trade_return = pd.to_numeric(pd.Series([trade_row.get("trade_return")]), errors="coerce").iloc[0]
+                if pd.isna(start) or pd.isna(end):
+                    continue
+                fig_price.add_vrect(
+                    x0=start,
+                    x1=end,
+                    fillcolor="rgba(239,68,68,0.18)" if pd.notna(trade_return) and float(trade_return) >= 0 else "rgba(22,163,74,0.18)",
+                    line_width=0,
+                    layer="below",
+                )
+        else:
+            for start, end in _long_spans(best_equity):
+                fig_price.add_vrect(
+                    x0=start,
+                    x1=end,
+                    fillcolor="rgba(246,199,199,0.28)",
+                    line_width=0,
+                    layer="below",
+                )
         prev = best_equity["position"].shift(1).fillna(0.0)
         open_dates = best_equity.loc[(prev <= 0) & (best_equity["position"] > 0), DATE_COL]
         close_dates = best_equity.loc[(prev > 0) & (best_equity["position"] <= 0), DATE_COL]

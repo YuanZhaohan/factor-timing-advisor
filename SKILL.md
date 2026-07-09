@@ -75,6 +75,8 @@ python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.cs
 - `results/score/monthly_refresh_daily_score.parquet`
 - `results/rule_pair/rule_pair_best_base_summary.parquet`
 - `results/rule_pair/rule_pair_best_base_equity_curves.parquet`
+- `results/selected_single_factor_rules/selected_rule_latest_status.parquet`
+- `results/selected_single_factor_rules/selected_rule_trades.parquet`
 - `results/strategy/monthly_strategy_summary_default.parquet`
 - `results/strategy/monthly_strategy_best_equity_default.parquet`
 - `results/report/advisor_summary.json`
@@ -108,6 +110,7 @@ workspace/runs/default/results/report/timing_report.html
 - 事件驱动模块：信号分布、看多/看空结构、净开仓量时序。
 - 综合打分模块：抄底得分、逃顶得分、score 策略净值。
 - 单因子规则模块：每个 base 因子的最优开仓/平仓规则与交互图。
+- 当前保留规则模块：`results/selected_single_factor_rules/` 中的正式单因子规则状态。
 
 正常日更耗时目标：约 3 到 5 分钟内。
 

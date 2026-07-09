@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 try:
     from plotly.io._html import get_plotlyjs
 except Exception:
@@ -31,6 +30,7 @@ from timing_config import (
     CODE_COL,
     CORE_CATEGORIES,
     DATE_COL,
+    NAME_COL,
     PRICE_COL,
     SIGNAL_DATE_COL,
     SIGNAL_FACTOR_COL,
@@ -53,9 +53,12 @@ def _category_colors() -> dict[str, str]:
         "赔率/估值": "#2ecc71",
         "赔率/筹码": "#e67e22",
         "胜率/估值": "#9b59b6",
+        "胜率/量": "#7B2CBF",
+        "胜率/资金": "#2563eb",
         "辅助/筹码结构": "#1abc9c",
         "辅助/资金分歧": "#e74c3c",
         "辅助/风险状态": "#95a5a6",
+        "辅助/技术状态": "#64748b",
     }
 
 
@@ -524,85 +527,66 @@ def _safe_float(value: Any) -> float:
     return num
 
 
-def _rule_pair_latest_signal_overview(rule_summary: pd.DataFrame, equity_curves: pd.DataFrame) -> dict[str, Any]:
-    if rule_summary.empty or equity_curves.empty:
+def _date_text(value: Any) -> str:
+    if value is None or value == "":
+        return "--"
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return "--"
+    return str(pd.Timestamp(ts).date())
+
+
+def _base_factor_name(factor: Any) -> str:
+    text = str(factor or "")
+    for suffix in ("_月线", "_季线", "_年线"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
+def _selected_rule_latest_signal_overview(status_df: pd.DataFrame, summary_df: pd.DataFrame) -> dict[str, Any]:
+    if status_df.empty:
         return {"total": 0, "bullish": [], "bearish": [], "bullish_count": 0, "bearish_count": 0}
 
-    eq = equity_curves.copy()
-    eq[DATE_COL] = pd.to_datetime(eq[DATE_COL], errors="coerce")
-    eq = eq.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
-    if eq.empty:
-        return {"total": 0, "bullish": [], "bearish": [], "bullish_count": 0, "bearish_count": 0}
+    summary_by_rule: dict[str, pd.Series] = {}
+    if not summary_df.empty and "rule_id" in summary_df.columns:
+        for _, row in summary_df.iterrows():
+            summary_by_rule[str(row.get("rule_id", ""))] = row
 
-    code_col = _pick_code_col(rule_summary)
-    eq_code_col = _pick_code_col(eq)
     records: list[dict[str, Any]] = []
-    for _, row in rule_summary.iterrows():
+    latest_dates = pd.to_datetime(status_df.get("latest_date", pd.Series(dtype=object)), errors="coerce")
+    latest_ts = latest_dates.max() if len(latest_dates) else pd.NaT
+    for _, row in status_df.iterrows():
+        rule_id = str(row.get("rule_id", ""))
         factor = str(row.get("factor", ""))
-        open_condition = str(row.get("open_condition", ""))
-        close_condition = str(row.get("close_condition", ""))
-        base_factor = str(row.get("base_factor", factor))
-        code = str(row.get(code_col, ""))
-        mask = (
-            eq[eq_code_col].astype(str).eq(code)
-            & eq["factor"].astype(str).eq(factor)
-            & eq["open_condition"].astype(str).eq(open_condition)
-            & eq["close_condition"].astype(str).eq(close_condition)
-        )
-        if "base_factor" in eq.columns:
-            mask &= eq["base_factor"].astype(str).eq(base_factor)
-        group = eq.loc[mask].copy()
-        if group.empty:
-            continue
-        group = group.sort_values(DATE_COL).reset_index(drop=True)
-        pos = pd.to_numeric(group["position"], errors="coerce").fillna(0.0)
-        latest = group.iloc[-1]
-        latest_position = float(pos.iloc[-1])
-        prev = pos.shift(1).fillna(0.0)
-        open_events = group[(prev <= 0) & (pos > 0)]
-        close_events = group[(prev > 0) & (pos <= 0)]
-        last_open = open_events[DATE_COL].max() if not open_events.empty else pd.NaT
-        last_close = close_events[DATE_COL].max() if not close_events.empty else pd.NaT
-        if latest_position > 0:
-            current_view = "看多"
-            state_class = "pill-bullish"
-            last_signal_type = "开仓"
-            last_signal_date = last_open
+        summary_row = summary_by_rule.get(rule_id, pd.Series(dtype=object))
+        current_state = str(row.get("current_state", "空"))
+        is_long = current_state == "多"
+        last_signal_date = row.get("last_open_signal_date") if is_long else row.get("last_close_signal_date")
+        last_signal_date_text = _date_text(last_signal_date)
+        if last_signal_date_text == "--":
+            state_age_days: Any = pd.NA
         else:
-            current_view = "看空"
-            state_class = "pill-bearish"
-            last_signal_type = "平仓"
-            last_signal_date = last_close
-        if pd.isna(last_signal_date):
-            state_age_days = pd.NA
-            last_signal_date_text = "--"
-        else:
-            state_age_days = int((pd.Timestamp(latest[DATE_COL]) - pd.Timestamp(last_signal_date)).days)
-            last_signal_date_text = str(pd.Timestamp(last_signal_date).date())
+            state_age_days = int((pd.Timestamp(latest_ts) - pd.Timestamp(last_signal_date_text)).days) if pd.notna(latest_ts) else pd.NA
         records.append(
             {
                 "factor": factor,
-                "base_factor": base_factor,
-                "current_view": current_view,
-                "state_class": state_class,
-                "position": latest_position,
-                "latest_date": str(pd.Timestamp(latest[DATE_COL]).date()),
-                "last_signal_type": last_signal_type if last_signal_date_text != "--" else "无",
+                "base_factor": _base_factor_name(factor),
+                "current_view": "看多" if is_long else "看空",
+                "state_class": "pill-bullish" if is_long else "pill-bearish",
+                "position": 1.0 if is_long else 0.0,
+                "latest_date": _date_text(row.get("latest_date")),
+                "last_signal_type": "开仓" if is_long and last_signal_date_text != "--" else "平仓" if last_signal_date_text != "--" else "无",
                 "last_signal_date": last_signal_date_text,
                 "state_age_days": state_age_days,
-                "open_rule": format_rule_name_cn(open_condition),
-                "close_rule": format_rule_name_cn(close_condition),
-                "excess_annual_return": _safe_float(row.get("excess_annual_return")),
-                "sharpe": _safe_float(row.get("sharpe")),
+                "open_rule": str(row.get("open_condition", "")),
+                "close_rule": str(row.get("close_condition", "")),
+                "excess_annual_return": _safe_float(summary_row.get("excess_annual_return")),
+                "sharpe": _safe_float(summary_row.get("sharpe")),
             }
         )
 
-    def sort_key(item: dict[str, Any]) -> tuple[int, str]:
-        date_text = str(item.get("last_signal_date", ""))
-        has_date = 0 if date_text == "--" else 1
-        return (has_date, date_text)
-
-    records = sorted(records, key=sort_key, reverse=True)
+    records = sorted(records, key=lambda item: (str(item.get("last_signal_date", "")) != "--", str(item.get("last_signal_date", ""))), reverse=True)
     bullish = [item for item in records if item["current_view"] == "看多"]
     bearish = [item for item in records if item["current_view"] == "看空"]
     return {
@@ -613,6 +597,51 @@ def _rule_pair_latest_signal_overview(rule_summary: pd.DataFrame, equity_curves:
         "bullish": bullish,
         "bearish": bearish,
     }
+
+
+def _selected_rule_metric_html(summary_row: pd.Series, status_row: pd.Series) -> str:
+    trade_count_value = _safe_float(summary_row.get("trade_count", 0))
+    trade_count_text = "--" if not np.isfinite(trade_count_value) else str(int(trade_count_value))
+    metrics = [
+        ("年化超额", _format_pct_value(summary_row.get("excess_annual_return"), 1)),
+        ("Sharpe", _format_float(summary_row.get("sharpe"), 2)),
+        ("最大回撤", _format_pct_value(summary_row.get("max_drawdown"), 1)),
+        ("交易数", trade_count_text),
+        ("胜率", _format_pct_value(summary_row.get("win_rate"), 1)),
+        ("当前状态", str(status_row.get("current_state", "--") or "--")),
+    ]
+    return "".join(
+        "<span class='rule-metric-chip'>"
+        f"<b>{_escape(label)}</b>{_escape(value)}"
+        "</span>"
+        for label, value in metrics
+    )
+
+
+def _filter_selected_rule_rows(df: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    if "rule_id" in out.columns:
+        out = out[out["rule_id"].astype(str).eq(str(row.get("rule_id", "")))]
+    if CODE_COL in out.columns and CODE_COL in row.index:
+        out = out[out[CODE_COL].astype(str).eq(str(row.get(CODE_COL, "")))]
+    return out.copy()
+
+
+def _selected_positions_to_equity_curve(positions_df: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
+    group = _filter_selected_rule_rows(positions_df, row)
+    if group.empty:
+        return group
+    group = group.copy()
+    group[DATE_COL] = pd.to_datetime(group[DATE_COL], errors="coerce")
+    group = group.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
+    strategy_return = pd.to_numeric(group.get("strategy_return"), errors="coerce").fillna(0.0)
+    benchmark_return = pd.to_numeric(group.get("benchmark_return"), errors="coerce").fillna(0.0)
+    group["strategy_equity"] = (1 + strategy_return).cumprod()
+    group["benchmark_equity"] = (1 + benchmark_return).cumprod()
+    group["excess_equity"] = group["strategy_equity"] / group["benchmark_equity"].replace(0, np.nan)
+    return group
 
 
 def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = None, report_title: str = "宽基择时信号报告") -> dict[str, Any]:
@@ -649,31 +678,39 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
             "signals.csv",
         ],
     )
-    rule_best_summary_df = _read_csv(
+    selected_rule_summary_df = _read_csv(
         input_dir,
         [
-            "results/rule_pair/rule_pair_best_base_summary.csv",
-            "rule_pair_best_base_summary.csv",
-            "results/rule_pair/rule_pair_summary.csv",
-            "rule_pair_summary.csv",
+            "results/selected_single_factor_rules/selected_rule_summary.csv",
+            "selected_single_factor_rules/selected_rule_summary.csv",
+            "selected_rule_summary.csv",
         ],
         optional=True,
     )
-    rule_summary_df = _read_csv(
+    selected_rule_status_df = _read_csv(
         input_dir,
         [
-            "results/rule_pair/rule_pair_summary.csv",
-            "rule_pair_summary.csv",
+            "results/selected_single_factor_rules/selected_rule_latest_status.csv",
+            "selected_single_factor_rules/selected_rule_latest_status.csv",
+            "selected_rule_latest_status.csv",
         ],
         optional=True,
     )
-    rule_best_equity_df = _read_csv(
+    selected_rule_trades_df = _read_csv(
         input_dir,
         [
-            "results/rule_pair/rule_pair_best_base_equity_curves.csv",
-            "rule_pair_best_base_equity_curves.csv",
-            "results/rule_pair/equity_curves.csv",
-            "equity_curves.csv",
+            "results/selected_single_factor_rules/selected_rule_trades.csv",
+            "selected_single_factor_rules/selected_rule_trades.csv",
+            "selected_rule_trades.csv",
+        ],
+        optional=True,
+    )
+    selected_rule_positions_df = _read_csv(
+        input_dir,
+        [
+            "results/selected_single_factor_rules/selected_rule_daily_positions.csv",
+            "selected_single_factor_rules/selected_rule_daily_positions.csv",
+            "selected_rule_daily_positions.csv",
         ],
         optional=True,
     )
@@ -692,12 +729,9 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         strategy_df = strategy_df.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
     if not strategy_summary_df.empty and "excess_annual_return" in strategy_summary_df.columns:
         strategy_summary_df = strategy_summary_df.sort_values("excess_annual_return", ascending=False).reset_index(drop=True)
-    if not rule_best_summary_df.empty and "excess_annual_return" in rule_best_summary_df.columns:
-        rule_best_summary_df = rule_best_summary_df.sort_values("excess_annual_return", ascending=False).reset_index(drop=True)
-    if not rule_best_equity_df.empty and DATE_COL in rule_best_equity_df.columns:
-        rule_best_equity_df[DATE_COL] = pd.to_datetime(rule_best_equity_df[DATE_COL], errors="coerce")
-        rule_best_equity_df = rule_best_equity_df.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
-    rule_pair_signal_overview = _rule_pair_latest_signal_overview(rule_best_summary_df, rule_best_equity_df)
+    if not selected_rule_summary_df.empty and "excess_annual_return" in selected_rule_summary_df.columns:
+        selected_rule_summary_df = selected_rule_summary_df.sort_values("excess_annual_return", ascending=False).reset_index(drop=True)
+    rule_pair_signal_overview = _selected_rule_latest_signal_overview(selected_rule_status_df, selected_rule_summary_df)
 
     strategy_plot_html = ""
     strategy_z20_html = ""
@@ -722,26 +756,32 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         effective_signals_df = signals_df.iloc[0:0].copy()
 
     rule_pair_cards: list[dict[str, Any]] = []
-    if not rule_best_summary_df.empty:
-        code_col = _pick_code_col(rule_best_summary_df)
-        equity_code_col = _pick_code_col(rule_best_equity_df) if not rule_best_equity_df.empty else CODE_COL
-        for _, row in rule_best_summary_df.iterrows():
+    if not selected_rule_summary_df.empty:
+        status_by_rule: dict[str, pd.Series] = {}
+        if not selected_rule_status_df.empty and "rule_id" in selected_rule_status_df.columns:
+            for _, status_row in selected_rule_status_df.iterrows():
+                status_by_rule[str(status_row.get("rule_id", ""))] = status_row
+        for _, row in selected_rule_summary_df.iterrows():
             factor = str(row.get("factor", ""))
-            base_factor = str(row.get("base_factor", factor))
-            desc = factor_desc_map.get(base_factor, factor_desc_map.get(factor, {}))
+            base_factor = _base_factor_name(factor)
+            desc = dict(factor_desc_map.get(base_factor, factor_desc_map.get(factor, {})) or {})
+            if not desc.get("category"):
+                desc["category"] = row.get("category", "")
+            if not desc.get("meaning"):
+                desc["meaning"] = row.get("strategy_label", "")
+            if not desc.get("note"):
+                desc["note"] = row.get("notes", "")
+            status_row = status_by_rule.get(str(row.get("rule_id", "")), pd.Series(dtype=object))
             row_copy = row.copy()
-            if not rule_best_equity_df.empty:
-                mask = (
-                    rule_best_equity_df[equity_code_col].astype(str).eq(str(row[code_col]))
-                    & rule_best_equity_df["factor"].astype(str).eq(str(row["factor"]))
-                    & rule_best_equity_df["open_condition"].astype(str).eq(str(row["open_condition"]))
-                    & rule_best_equity_df["close_condition"].astype(str).eq(str(row["close_condition"]))
-                )
-                if "base_factor" in rule_best_equity_df.columns and "base_factor" in row.index:
-                    mask &= rule_best_equity_df["base_factor"].astype(str).eq(str(row["base_factor"]))
-                row_copy.attrs["_equity_df"] = rule_best_equity_df.loc[mask].copy()
+            row_copy.attrs["_equity_df"] = _selected_positions_to_equity_curve(selected_rule_positions_df, row)
+            row_copy.attrs["_trade_df"] = _filter_selected_rule_rows(selected_rule_trades_df, row)
             try:
-                chart_html = _make_rule_pair_html(input_df, signals_df, row_copy, desc)
+                chart_html = (
+                    "<div class='rule-selected-metrics'>"
+                    f"{_selected_rule_metric_html(row, status_row)}"
+                    "</div>"
+                    + _make_rule_pair_html(input_df, signals_df, row_copy, desc)
+                )
             except Exception as exc:
                 chart_html = (
                     "<div class='chart-error'>"
@@ -936,8 +976,8 @@ def _render_rule_pair_signal_overview(overview: dict[str, Any]) -> str:
 <div class="rule-signal-overview">
   <div class="rule-signal-head">
     <div>
-      <h3>32个最优单因子当前多空状态</h3>
-      <p>按每个 base 因子历史最优规则组合的最新 position 判断：position &gt; 0 为当前看多，position = 0 为当前看空/空仓；日期为最近一次开仓或平仓状态切换日。</p>
+      <h3>当前保留单因子规则多空状态</h3>
+      <p>这里不再使用全量 rule pair 遍历结果，而是按 selected_single_factor_rules 中人工研究后保留的最优规则计算：当前状态为“多”表示规则仍在持仓，“空”表示空仓；日期为最近一次开仓或平仓状态切换日。</p>
     </div>
     <div class="rule-signal-counts">
       <span class="keyword-pill pill-core">合计 {int(overview.get('total', 0))}</span>
@@ -947,7 +987,7 @@ def _render_rule_pair_signal_overview(overview: dict[str, Any]) -> str:
   </div>
   <div class="rule-signal-columns">
     <div class="rule-signal-table-card">
-      <div class="rule-signal-title bullish-title">当前看多的最优指标</div>
+      <div class="rule-signal-title bullish-title">当前看多的保留规则</div>
       <div class="compact-table-wrap">
         <table class="compact-signal-table">
           <thead><tr><th>指标</th><th>状态</th><th>最近信号</th><th>触发规则</th><th>年化超额</th><th>夏普</th></tr></thead>
@@ -956,7 +996,7 @@ def _render_rule_pair_signal_overview(overview: dict[str, Any]) -> str:
       </div>
     </div>
     <div class="rule-signal-table-card">
-      <div class="rule-signal-title bearish-title">当前看空/空仓的最优指标</div>
+      <div class="rule-signal-title bearish-title">当前看空/空仓的保留规则</div>
       <div class="compact-table-wrap">
         <table class="compact-signal-table">
           <thead><tr><th>指标</th><th>状态</th><th>最近信号</th><th>触发规则</th><th>年化超额</th><th>夏普</th></tr></thead>
@@ -973,7 +1013,8 @@ def _render_evidence_rows(v: dict[str, Any]) -> str:
     rows = []
     for cat in v["category_evidence"]:
         cname = str(cat["factor_category"])
-        net_score = float(cat["net_score"])
+        net_score = _safe_float(cat.get("net_score"))
+        net_score = net_score if np.isfinite(net_score) else 0.0
         score_color = "#e74c3c" if net_score < -0.3 else "#f39c12" if net_score < 0 else "#2ecc71"
         ccol = v["category_colors"].get(cname, "#888")
         rows.append(
@@ -998,7 +1039,8 @@ def _render_category_bars(v: dict[str, Any]) -> str:
         bullish = round(int(cat["看多"]) / total * 100, 1) if total else 0.0
         bearish = round(int(cat["看空"]) / total * 100, 1) if total else 0.0
         neutral = max(0.0, round(100 - bullish - bearish, 1))
-        net_score = float(cat["net_score"])
+        net_score = _safe_float(cat.get("net_score"))
+        net_score = net_score if np.isfinite(net_score) else 0.0
         score_color = "#e74c3c" if net_score < -0.3 else "#f39c12" if net_score < 0 else "#2ecc71"
         ccol = v["category_colors"].get(str(cat["factor_category"]), "#888")
         html.append(
@@ -1168,7 +1210,8 @@ def render_html(v: dict[str, Any]) -> str:
     interpretable_ratio = float(scores.get("interpretable_ratio", 0.0)) * 100
     cat_interp_parts = []
     for cat in v["category_evidence"]:
-        net_score = float(cat["net_score"])
+        net_score = _safe_float(cat.get("net_score"))
+        net_score = net_score if np.isfinite(net_score) else 0.0
         score_cls = "pill-bullish" if net_score > 0.3 else "pill-bearish" if net_score < -0.3 else "pill-neutral"
         evidence = str(cat["主证据"])
         evidence_cls = (
@@ -1313,6 +1356,9 @@ tr:hover{{background:#f8f9fa}}
 .rule-pair-card.hidden{{display:none}}
 .rule-pair-header{{margin-bottom:12px}}
 .rule-pair-header h3{{font-size:15px;color:#1a1a2e;margin-bottom:6px}}
+.rule-selected-metrics{{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 6px 0}}
+.rule-metric-chip{{display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid #e5e7eb;border-radius:999px;padding:4px 9px;font-size:12px;color:#475467}}
+.rule-metric-chip b{{color:#1f2937}}
 .rule-signal-overview{{background:#fbfcff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin:14px 0 18px 0}}
 .rule-signal-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px;flex-wrap:wrap}}
 .rule-signal-head h3{{font-size:15px;color:#1f2937;margin-bottom:4px}}
@@ -1513,12 +1559,12 @@ tr:hover{{background:#f8f9fa}}
 
   <div id="rule-module-panel" class="module-panel">
     <h2 class="module-heading">单因子规则模块</h2>
-    <p class="module-intro">单因子规则模块逐个展示每个 base 因子历史上表现最好的开仓和平仓规则组合。它用于回答某个因子单独使用时，什么事件规则最有效、交易点是否合理、超额收益是否稳定。这些结果主要作为规则解释和因子筛选参考，不等同于最终综合策略。</p>
+    <p class="module-intro">单因子规则模块保留原来的网页形式，但内容切换为当前正式保留的 selected rules。这里展示的是我们逐个因子研究后沉淀下来的开仓、闭仓规则，不再使用全量 rule pair 遍历结果。</p>
     {rule_pair_signal_overview_html}
 
   <div class="card">
-    <h2>各 base 指标最优规则组合回测 <span class="badge">{len(v['rule_pair_cards'])} 个因子</span></h2>
-    <p style="font-size:13px;color:#666;margin-bottom:16px;">保持原有内容结构，只把时序图改成可交互图。悬停可以查看每个时间点的具体数值。</p>
+    <h2>当前保留单因子最优规则回测 <span class="badge">{len(v['rule_pair_cards'])} 个因子</span></h2>
+    <p style="font-size:13px;color:#666;margin-bottom:16px;">图中阴影为做多持仓区间：红色表示该笔交易盈利，绿色表示该笔交易亏损；绿色三角为次日入场后的开仓点，红色三角为平仓点；下方净值图展示规则净值、基准净值和超额净值。</p>
     {rule_search}
     <div class="rule-pair-grid">{rule_pair_cards}</div>
   </div>
@@ -1569,6 +1615,7 @@ function updateRulePairSearch() {{
     var allBox = section.querySelector('.rule-sub-category-all');
     if (allBox) {{
       allBox.checked = selectedCategories.length === checks.length;
+      allBox.indeterminate = selectedCategories.length > 0 && selectedCategories.length < checks.length;
     }}
     section.querySelectorAll('.rule-pair-card').forEach(function(card) {{
       sectionTotal += 1;
@@ -1584,7 +1631,8 @@ function updateRulePairSearch() {{
         visible += 1;
       }}
     }});
-    section.classList.toggle('hidden', sectionVisible === 0);
+    var keepFilterVisible = checks.length > 0 && selectedCategories.length === 0;
+    section.classList.toggle('hidden', sectionVisible === 0 && !keepFilterVisible);
     var count = section.querySelector('.rule-category-count');
     if (count) {{
       count.textContent = sectionVisible + ' / ' + sectionTotal;
