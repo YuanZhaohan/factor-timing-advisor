@@ -24,6 +24,12 @@ D:\anaconda\python.exe .\skills\factor-timing-advisor\scripts\run_pipeline.py se
 
 日更链路 `score-update` 和全量链路 `all` 已自动刷新本模块。
 
+单因子规则刷新完成后，会继续生成两类正式复合策略。策略逻辑、权重和输出说明见：
+
+```text
+references/composite_timing_strategies.md
+```
+
 说明：
 
 - `score-update` 日更链路默认不再刷新 rule pair；rule pair 研究代码保留，但不作为日常增量报告的必跑步骤。
@@ -47,6 +53,14 @@ skills/factor-timing-advisor/workspace/runs/default/results/selected_single_fact
 | `selected_rule_summary.csv/parquet` | 每条规则的历史表现摘要 |
 | `selected_rule_trades.csv/parquet` | 逐笔交易明细 |
 | `selected_rule_daily_positions.csv/parquet` | 每条规则的日度持仓 |
+
+复合策略输出位于：
+
+```text
+results/composite_timing_strategies/
+```
+
+两类复合策略的加权、调仓与执行逻辑见 `references/composite_timing_strategies.md`。
 
 
 ## 执行约定

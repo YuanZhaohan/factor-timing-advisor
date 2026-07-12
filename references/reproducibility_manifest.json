@@ -1,0 +1,51 @@
+{
+  "python": {
+    "version": "3.13.9",
+    "implementation": "CPython"
+  },
+  "packages": {
+    "numpy": "2.3.5",
+    "pandas": "2.3.3",
+    "pyarrow": "21.0.0",
+    "matplotlib": "3.10.6",
+    "plotly": "6.3.0"
+  },
+  "files": [
+    {
+      "path": "workspace/data/\u5bbd\u57fa\u5f97\u5206.csv",
+      "exists": true,
+      "size": 4507048,
+      "sha256": "de07de0f1b7c24e5a2dd7b327bb3f2c56aa4cb30e18a1e8477ee62cb08ee980b"
+    },
+    {
+      "path": "workspace/runs/default/data/input_snapshot.parquet",
+      "exists": true,
+      "size": 2172362,
+      "sha256": "4b4be9dfe317b2dd3882049c141b24c3d6c5c2e793cc136ea870d9e4af563ec3"
+    },
+    {
+      "path": "workspace/runs/default/results/signals/signals.parquet",
+      "exists": true,
+      "size": 1228861,
+      "sha256": "6b86a70d701344ca973efdf13017a2dc15b8b1fdedd05dbbe918e9658d5ca1b5"
+    },
+    {
+      "path": "workspace/runs/default/results/selected_single_factor_rules/selected_rule_summary.csv",
+      "exists": true,
+      "size": 7556,
+      "sha256": "41d1021d81e2eca2e562b7fbe3c4d072f69f8258e3bf9e8e12872593db3e2fba"
+    },
+    {
+      "path": "workspace/runs/default/results/selected_single_factor_rules/selected_rule_latest_status.csv",
+      "exists": true,
+      "size": 7563,
+      "sha256": "d7a3448945f8ef4b06538f51a5e85586f101f08acbd54df0486106a01a8cc109"
+    },
+    {
+      "path": "workspace/runs/default/results/report/current_signal_report.md",
+      "exists": true,
+      "size": 15902,
+      "sha256": "eabde7cabe0b479c98283a89ca0ab19a821afc9bcdd80cf1fd2e5a795f9a2881"
+    }
+  ]
+}

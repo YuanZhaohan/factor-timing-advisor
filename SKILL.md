@@ -1,21 +1,22 @@
 ---
 name: factor-timing-advisor
-description: 运行宽基因子择时主流程，生成 signals、事件回测、最佳 rule_pair、score 策略、JSON/HTML 报告和图表。适用于全量重跑和日常增量更新。
+description: 通过唯一 update 接口执行宽基因子择时的追加式一键更新，冻结历史输入，在暂存目录生成并验证 signals、score、单因子规则、复合策略、JSON/HTML 报告和图表后再安全切换正式结果；也支持显式全量重建和单模块维护。
 metadata:
   openclaw:
     emoji: "📊"
-user-invocable: true
 ---
 
 # Factor Timing Advisor
 
 这是宽基因子择时的正式 skill。优先使用 skill 内置脚本，不再调用项目根目录旧测试脚本。
 
-正式入口：
+项目根目录下的正式入口：
 
 ```text
-scripts/run_pipeline.py
+skills/factor-timing-advisor/scripts/run_pipeline.py
 ```
+
+默认只使用 `update` 子命令。不要直接调用内部的 `score-update`。
 
 默认运行目录：
 
@@ -32,40 +33,33 @@ workspace/runs/default/
 
 ## 每日更新
 
-每天只需要替换输入 CSV，然后跑 `score-update`。
+每天只需要替换输入 CSV，然后运行一次 `update`。
 
-### 0. 拉取最新数据（每次运行前必做）
-
-运行前先从 GitHub 检查skill是否更新运行的脚本，保证版本统一，然后再从 GitHub 拉取最新的 `宽基得分.csv`，确保数据目录已同步：
-
-```bash
-git pull origin main
-```
-
-如果 `workspace/data/宽基得分.csv` 有更新，再继续后续步骤。
-
-### 1. 更新输入数据
+### 0. 更新输入数据
 
 把最新宽基数据放到：
 
 ```text
-workspace/data/宽基得分.csv
+skills/factor-timing-advisor/workspace/data/宽基得分.csv
 ```
 
-要求：
+要求文件名和列名保持不变。原始 CSV 即使包含历史修订，`update` 也会以正式 `input_snapshot` 为冻结基线，只吸收严格晚于旧快照的新交易日，并记录被忽略的历史差异。
 
-- 文件名保持 `宽基得分.csv`，命令不用改。
-- 日期列追加到最新交易日。
-- 列名和历史文件保持一致。
-- 如果回填或重写了历史数据，不要只跑日更，改跑周末全量流程。
+### 1. 运行唯一的一键接口
 
-### 2. 跑日更链路
+在项目根目录只执行：
 
-在项目根目录执行：
-
-```bash
-python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.csv --output-dir workspace/runs/default
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py update
 ```
+
+`update` 会自动：
+
+1. 比较原始 CSV 与上次正式快照，冻结所有历史行，只追加新日期。
+2. 把历史差异、输入哈希、代码哈希和新增日期写入审计记录。
+3. 复制现有 run 到暂存目录，在暂存目录完成增量计算。
+4. 验证关键表的历史前缀完全不变，并检查所有输出更新到同一最新日期。
+5. 全部通过后才替换正式 `default`；失败时正式结果保持不动。
 
 日更会刷新：
 
@@ -73,10 +67,11 @@ python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.cs
 - `results/signals/signals.parquet`
 - `results/events/event_forward_returns.parquet`
 - `results/score/monthly_refresh_daily_score.parquet`
-- `results/rule_pair/rule_pair_best_base_summary.parquet`
-- `results/rule_pair/rule_pair_best_base_equity_curves.parquet`
 - `results/selected_single_factor_rules/selected_rule_latest_status.parquet`
 - `results/selected_single_factor_rules/selected_rule_trades.parquet`
+- `results/composite_timing_strategies/composite_strategy_latest_status.parquet`
+- `results/composite_timing_strategies/current_composite_signal.json`
+- `results/composite_timing_strategies/current_composite_signal.md`
 - `results/strategy/monthly_strategy_summary_default.parquet`
 - `results/strategy/monthly_strategy_best_equity_default.parquet`
 - `results/report/advisor_summary.json`
@@ -85,6 +80,8 @@ python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.cs
 - `results/report/signal_points_state.parquet`
 - `results/report/signal_points_summary.parquet`
 - `results/report/timing_report.html`
+- `results/report/update_status.json`
+- `results/report/update_history.jsonl`
 - `plots/strategy/`
 - `plots/factor/`
 - `plots/rule_pair_best/`
@@ -95,33 +92,33 @@ python scripts/run_pipeline.py score-update --csv workspace/data/宽基得分.cs
 results/events/open_close_trades.parquet
 ```
 
-这个文件属于重型 open-close 全组合统计，放到周末全量流程里更新。
+这个文件属于重型 open-close 全组合统计，只在用户明确要求的 `all` 全量流程中更新。
 
-### 3. 查看网页报告
+### 2. 查看网页报告
 
 日更完成后打开：
 
 ```text
-workspace/runs/default/results/report/timing_report.html
+skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report.html
 ```
 
-报告包含三块：
+报告包含四块：
 
 - 事件驱动模块：信号分布、看多/看空结构、净开仓量时序。
 - 综合打分模块：抄底得分、逃顶得分、score 策略净值。
-- 单因子规则模块：每个 base 因子的最优开仓/平仓规则与交互图。
-- 当前保留规则模块：`results/selected_single_factor_rules/` 中的正式单因子规则状态。
+- 单因子规则模块：正式保留规则的当前状态、最优开仓/平仓规则与交互图。
+- 复合策略模块：用两个同级策略标签分别展示策略逻辑、当前仓位、历史开平仓点、策略/基准净值、超额净值和绩效指标。
 
 正常日更耗时目标：约 3 到 5 分钟内。
 
-## 每周末全量更新
+## 显式全量更新
 
-每周末建议跑一次全量更新，用来刷新日更跳过的重型统计、rule_pair 全量扫描、score cache 和全部图表。
+不要定期自动全量重建。只有用户明确要求重建历史、规则、缓存或重型统计时，才运行 `all`。
 
 在项目根目录执行：
 
-```bash
-python scripts/run_pipeline.py all --csv workspace/data/宽基得分.csv --output-dir workspace/runs/default
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py all --csv .\skills\factor-timing-advisor\workspace\data\宽基得分.csv --output-dir .\skills\factor-timing-advisor\workspace\runs\default
 ```
 
 周末全量会覆盖更新：
@@ -136,40 +133,42 @@ python scripts/run_pipeline.py all --csv workspace/data/宽基得分.csv --outpu
 - `results/report/timing_report.html`
 - `plots/`
 
-原则：
-
-- 工作日只追加最新交易日时，跑 `score-update`。
-- 周末、规则变化、历史数据变化后，跑 `all`。
-- 如果全量耗时较长，这是正常的；它负责补齐日更为了速度跳过的全量研究统计。
+全量会改变历史结果，不属于默认的一键更新路径。执行前必须得到用户明确授权并单独保留修订说明。
 
 ## 常用命令
 
 只重新生成报告：
 
-```bash
-python scripts/run_pipeline.py report --input-dir workspace/runs/default
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py report --input-dir .\skills\factor-timing-advisor\workspace\runs\default
 ```
 
 只重跑 score 策略：
 
-```bash
-python scripts/run_pipeline.py strategy --input-dir workspace/runs/default --output-dir workspace/runs/default
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py strategy --input-dir .\skills\factor-timing-advisor\workspace\runs\default --output-dir .\skills\factor-timing-advisor\workspace\runs\default
 ```
 
 只重画图：
 
-```bash
-python scripts/run_pipeline.py plot --input-dir workspace/runs/default
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py plot --input-dir .\skills\factor-timing-advisor\workspace\runs\default
+```
+
+只刷新正式复合择时主策略与挑战者：
+
+```powershell
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py composite-strategies --input-dir .\skills\factor-timing-advisor\workspace\runs\default
 ```
 
 ## 什么时候必须全量
 
-以下情况不要只跑 `score-update`，要跑 `all` 或至少 `upstream`：
+以下情况不要自行继续运行，先向用户说明需要显式全量重建：
 
 1. 信号生成规则改了。
 2. `rule_pair` 回测逻辑改了。
 3. score 筛选或得分计算逻辑改了。
-4. 历史 CSV 被回填，不是只追加最新交易日。
+4. 用户明确要求采用历史 CSV 修订，而不是冻结历史、只追加新交易日。
 5. `workspace/runs/default/results/score/cache/` 被删除。
 6. 需要更新 `open_close_trades.parquet`。
 
@@ -220,6 +219,9 @@ factor-timing-advisor/
 - `references/开平仓规则说明.md`
 - `references/baseline_pipeline_flow.md`
 - `references/event_condition_checklist.md`
+- `references/selected_single_factor_rules.md`
+- `references/composite_timing_strategies.md`
+- `references/safe_incremental_update.md`
 
 ## 代码仓库
 
@@ -239,10 +241,10 @@ git push gitee main
 
 - 严格按本 `SKILL.md` 的命令和路径执行，不绕路、不改路径、不自己写替代脚本。
 - 不要为了“看起来更快”临时改代码、改输出目录、改文件名或跳过主流程步骤。
-- 默认每次更新只跑增量链路：`score-update`。
+- 默认每次更新只运行唯一入口：`update`。
 - 周末也不默认跑全量回测；只有用户明确要求“全量重跑”“全量回测”“跑 all”“重建 rule_pair / open_close_trades / score cache”时，才运行全量流程。
-- 如果只是更新 `workspace/data/宽基得分.csv` 后生成最新报告，仍然只跑 `score-update`。
-- 生成 HTML 报告前必须检查增量结果是否已经更新到输入数据最新日期：对比 `workspace/data/宽基得分.csv` 的最大日期与 `workspace/runs/default/results/score/monthly_refresh_daily_score.parquet`、`workspace/runs/default/results/signals/signals.parquet` 的最大日期。若结果日期落后，不要直接生成 HTML，先提示用户需要运行增量更新。
+- 不要直接调用 `score-update`；它是供 `update` 暂存流程使用的内部命令，没有历史冻结和安全切换保护。
+- `update` 自动检查 input snapshot、signals、score、单因子日度持仓、复合策略日度结果、基准策略净值和 HTML 的最新日期，不要绕过该检查单独生成 HTML。
 - 程序运行慢时不要 kill 或中断进程。命令没输出不代表卡住，Plotly/HTML 图表生成耗时数分钟是正常的，必须耐心等待自然跑完。
 - 判断失败前先读完整日志和完整报错堆栈，不要只看最后一行。
 - 出错后先定位原始异常、输入日期、输出日期和缺失文件，再决定是否需要重跑。

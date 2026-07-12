@@ -33,11 +33,14 @@ def find_entry() -> tuple[Path, Path]:
 
 
 def main() -> int:
-    _work_root, entry = find_entry()
-    caller_cwd = Path.cwd()
+    work_root, entry = find_entry()
+    skill_root = Path(__file__).resolve().parents[1]
+    local_entry = skill_root / "runtime" / "run_baseline_pipeline.py"
+    if entry.resolve() == local_entry.resolve() and skill_root.parent.name == "skills":
+        work_root = skill_root.parents[1]
     python_exe = os.environ.get("OPENCLAW_PYTHON") or sys.executable
     cmd = [python_exe, str(entry), *sys.argv[1:]]
-    return subprocess.call(cmd, cwd=str(caller_cwd))
+    return subprocess.call(cmd, cwd=str(work_root))
 
 
 if __name__ == "__main__":

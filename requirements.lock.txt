@@ -1,0 +1,7 @@
+# Reproducibility lock captured from the current working environment.
+# Use Python 3.13.x unless this file is deliberately refreshed.
+numpy==2.3.5
+pandas==2.3.3
+pyarrow==21.0.0
+matplotlib==3.10.6
+plotly==6.3.0

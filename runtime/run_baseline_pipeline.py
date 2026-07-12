@@ -23,13 +23,18 @@ from role_strategy import (
     update_monthly_refresh_daily_score_incremental,
 )
 from selected_single_factor_rules import run_selected_single_factor_rules
+from composite_timing_strategies import run_composite_timing_strategies
 from signal_generation import save_signal_table
 from baseline_score_strategy import backtest_z_rules, build_all_z_rules, plot_best_rule
 from io_utils import read_run_table, read_table, resolve_table_file, write_table
+from safe_incremental_update import run_safe_one_click_update
 from timing_config import CODE_COL, DEFAULT_TAXONOMY_PATH
 
 
 DEFAULT_HORIZONS = (1, 3, 5, 10, 15, 20, 60)
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SKILL_CSV = SKILL_ROOT / "workspace" / "data" / "宽基得分.csv"
+DEFAULT_SKILL_RUN_DIR = SKILL_ROOT / "workspace" / "runs" / "default"
 
 
 def _run_dirs(root: str | Path) -> dict[str, Path]:
@@ -186,6 +191,7 @@ def run_daily_refresh_pipeline(
     - optionally refresh only the best rule-pair for each base factor
     - refresh baseline strategy outputs
     - refresh selected single-factor rules
+    - refresh the retained primary and challenger composite timing strategies
     - refresh advisor report outputs
     - refresh plots
     """
@@ -238,6 +244,7 @@ def run_daily_refresh_pipeline(
         score_suffix=score_suffix,
     )
     selected_rule_stats = run_selected_single_factor_rules(input_dir=output_dir, output_dir=output_dir)
+    composite_strategy_stats = run_composite_timing_strategies(input_dir=output_dir, output_dir=output_dir)
     advisor_summary, scored, report = run_reporting_pipeline(
         input_dir=output_dir,
         output_dir=None,
@@ -262,6 +269,7 @@ def run_daily_refresh_pipeline(
         "strategy_summary_rows": len(summary),
         "best_equity_rows": len(best_equity),
         **selected_rule_stats,
+        **composite_strategy_stats,
         "advisor_scored_rows": len(scored),
         "plot_count": len(manifest),
     }
@@ -439,9 +447,93 @@ def run_factor_plots(
     return manifest
 
 
+def run_full_refresh_pipeline(
+    csv_path: str | Path,
+    output_dir: str | Path,
+    warmup_years: int = 3,
+    min_history_years: int = 2,
+    min_raw_open_events_per_quarter: float | None = 2.0,
+    min_excess_annual_return: float | None = 0.05,
+    max_equity_curves: int | None = 200,
+    parallel_n_jobs: int = 1,
+    save_intermediates: bool = True,
+    score_suffix: str = "default",
+    lookback_days: int = 252 * 3,
+    year_end_target_years: tuple[int, ...] | None = None,
+    report_top_n: int = 30,
+) -> dict[str, int]:
+    """Run the complete rebuild path and return a machine-readable summary."""
+    (
+        signal_table,
+        event_summary,
+        trade_summary,
+        rule_summary,
+        rule_summary_by_year_end,
+        equity_curves,
+        daily_score,
+    ) = run_upstream_pipeline(
+        csv_path=csv_path,
+        output_dir=output_dir,
+        warmup_years=warmup_years,
+        min_history_years=min_history_years,
+        min_raw_open_events_per_quarter=min_raw_open_events_per_quarter,
+        min_excess_annual_return=min_excess_annual_return,
+        max_equity_curves=max_equity_curves,
+        parallel_n_jobs=parallel_n_jobs,
+        save_intermediates=save_intermediates,
+        year_end_target_years=year_end_target_years,
+    )
+    summary, best_equity = run_baseline_strategy(
+        input_dir=output_dir,
+        output_dir=output_dir,
+        score_suffix=score_suffix,
+    )
+    selected_rule_stats = run_selected_single_factor_rules(input_dir=output_dir, output_dir=output_dir)
+    composite_strategy_stats = run_composite_timing_strategies(
+        input_dir=output_dir,
+        output_dir=output_dir,
+    )
+    _, scored, _ = run_reporting_pipeline(
+        input_dir=output_dir,
+        output_dir=None,
+        report_top_n=report_top_n,
+    )
+    manifest = run_factor_plots(
+        input_dir=output_dir,
+        output_dir=None,
+        lookback_days=lookback_days,
+        select_by_backtest=True,
+        show_base_factor_points=True,
+    )
+    return {
+        "signals": len(signal_table),
+        "event_summary_rows": len(event_summary),
+        "trade_summary_rows": len(trade_summary),
+        "rule_pair_rows": len(rule_summary),
+        "rule_pair_year_end_rows": len(rule_summary_by_year_end),
+        "equity_curve_rows": len(equity_curves),
+        "daily_score_rows": len(daily_score),
+        "strategy_summary_rows": len(summary),
+        "best_equity_rows": len(best_equity),
+        **selected_rule_stats,
+        **composite_strategy_stats,
+        "advisor_scored_rows": len(scored),
+        "plot_count": len(manifest),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified baseline pipeline runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    update = subparsers.add_parser(
+        "update",
+        help="One-click append-only update: freeze history, run in staging, verify, then promote.",
+    )
+    update.add_argument("--csv", default=str(DEFAULT_SKILL_CSV))
+    update.add_argument("--run-dir", default=str(DEFAULT_SKILL_RUN_DIR))
+    update.add_argument("--numeric-atol", type=float, default=1e-12)
+    update.add_argument("--dry-run", action="store_true", help="Only inspect additions and historical differences.")
 
     upstream = subparsers.add_parser("upstream", help="Generate signals, event study, rule pair, utility, and daily score.")
     upstream.add_argument("--csv", default="data/宽基得分.csv")
@@ -460,7 +552,10 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument("--output-dir", default="results_score_event_full_monthly")
     strategy.add_argument("--score-suffix", default="default")
 
-    score_update = subparsers.add_parser("score-update", help="Daily refresh: update signals, events, score strategy, selected rules, report, and plots; skip rule-pair refresh by default.")
+    score_update = subparsers.add_parser(
+        "score-update",
+        help="Internal unguarded daily runner; human/agent callers should use update.",
+    )
     score_update.add_argument("--csv", default="data/宽基得分.csv")
     score_update.add_argument("--output-dir", default="results_score_event_full_monthly")
     score_update.add_argument("--warmup-years", type=int, default=3)
@@ -490,6 +585,16 @@ def build_parser() -> argparse.ArgumentParser:
     selected_rules.add_argument("--input-dir", default="results_score_event_full_monthly")
     selected_rules.add_argument("--output-dir", default=None)
 
+    composite_strategies = subparsers.add_parser(
+        "composite-strategies",
+        help="Build the retained primary and challenger composite timing strategies from selected-rule positions.",
+    )
+    composite_strategies.add_argument("--input-dir", default="results_score_event_full_monthly")
+    composite_strategies.add_argument("--output-dir", default=None)
+    composite_strategies.add_argument("--frequency-train-end", default="2020-12-31")
+    composite_strategies.add_argument("--strong-event-threshold", type=float, default=0.25)
+    composite_strategies.add_argument("--cost-bps", type=float, default=5.0)
+
     full = subparsers.add_parser("all", help="Run upstream pipeline, strategy, report, and plot.")
     full.add_argument("--csv", default="data/宽基得分.csv")
     full.add_argument("--output-dir", default="results_score_event_full_monthly")
@@ -510,6 +615,27 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "update":
+        audit = run_safe_one_click_update(
+            csv_path=args.csv,
+            run_dir=args.run_dir,
+            skill_root=SKILL_ROOT,
+            daily_runner=run_daily_refresh_pipeline,
+            full_runner=run_full_refresh_pipeline,
+            numeric_atol=args.numeric_atol,
+            dry_run=args.dry_run,
+        )
+        diff = audit.get("input_diff", {})
+        print(f"update_status={audit.get('status')}")
+        print(f"update_mode={audit.get('mode')}")
+        print(f"added_rows={diff.get('added_rows', 0)}")
+        print(f"added_dates={','.join(diff.get('added_dates', []))}")
+        print(f"ignored_history_changed_rows={diff.get('ignored_history_changed_rows', 0)}")
+        print(f"ignored_history_changed_cells={diff.get('ignored_history_changed_cells', 0)}")
+        if not args.dry_run:
+            print(f"audit_file={Path(args.run_dir) / 'results' / 'report' / 'update_status.json'}")
+        return
 
     if args.command == "upstream":
         signal_table, event_summary, trade_summary, rule_summary, rule_summary_by_year_end, equity_curves, daily_score = run_upstream_pipeline(
@@ -589,6 +715,20 @@ def main() -> None:
             input_dir=args.input_dir,
             output_dir=args.output_dir,
         )
+        out_root = args.output_dir if args.output_dir is not None else args.input_dir
+        stats.update(run_composite_timing_strategies(input_dir=out_root, output_dir=out_root))
+        for key, value in stats.items():
+            print(f"{key}={value}")
+        return
+
+    if args.command == "composite-strategies":
+        stats = run_composite_timing_strategies(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            frequency_train_end=args.frequency_train_end,
+            strong_event_threshold=args.strong_event_threshold,
+            cost_bps=args.cost_bps,
+        )
         for key, value in stats.items():
             print(f"{key}={value}")
         return
@@ -612,6 +752,10 @@ def main() -> None:
             score_suffix=args.score_suffix,
         )
         selected_rule_stats = run_selected_single_factor_rules(input_dir=args.output_dir, output_dir=args.output_dir)
+        composite_strategy_stats = run_composite_timing_strategies(
+            input_dir=args.output_dir,
+            output_dir=args.output_dir,
+        )
         advisor_summary, scored, report = run_reporting_pipeline(
             input_dir=args.output_dir,
             output_dir=None,
@@ -634,6 +778,8 @@ def main() -> None:
         print(f"strategy_summary_rows={len(summary)}")
         print(f"best_equity_rows={len(best_equity)}")
         for key, value in selected_rule_stats.items():
+            print(f"{key}={value}")
+        for key, value in composite_strategy_stats.items():
             print(f"{key}={value}")
         print(f"advisor_scored_rows={len(scored)}")
         print(f"plot_count={len(manifest)}")

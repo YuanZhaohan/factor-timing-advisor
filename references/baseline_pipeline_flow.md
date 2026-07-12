@@ -26,19 +26,24 @@
 ### 2. 日常增量更新
 
 ```powershell
-& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py score-update --csv .\skills\factor-timing-advisor\workspace\data\宽基得分.csv --output-dir .\skills\factor-timing-advisor\workspace\runs\default
+& 'D:\anaconda\python.exe' .\skills\factor-timing-advisor\scripts\run_pipeline.py update
 ```
+
+这是唯一的人工日更入口。它冻结旧 `input_snapshot` 的历史行，只追加新日期，在暂存目录运行并验证后才切换正式结果。
 
 当前会更新：
 
-- `signals.csv`
-- `event_forward_returns.csv`
-- `open_close_trades.csv`
-- `monthly_refresh_daily_score.csv`
-- 每个 base 因子的最佳 `rule_pair`
+- `signals.parquet`
+- `event_forward_returns.parquet`
+- `monthly_refresh_daily_score.parquet`
 - 基准 score 策略净值
+- 正式单因子规则
+- 两套复合择时策略
 - `advisor_summary.json / md / html`
 - 全部图
+- `update_status.json / update_history.jsonl`
+
+日更不会刷新重型 `open_close_trades` 和全量 `rule_pair` 扫描。
 
 ### 3. 只重跑基准 score 策略
 
@@ -75,12 +80,18 @@
 
 ```text
 原始 CSV
+  -> append-only preflight（冻结历史，只取新日期）
+  -> staging run
   -> signals
   -> events
   -> rule_pair
   -> factor_signal_utility
   -> monthly_refresh_daily_score
   -> baseline score strategy
+  -> selected single-factor rules
+  -> composite timing strategies
   -> report
   -> plot
+  -> history/date verification
+  -> promote staging to default
 ```

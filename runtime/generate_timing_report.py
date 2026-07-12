@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 try:
     from plotly.io._html import get_plotlyjs
 except Exception:
@@ -25,6 +27,10 @@ from interactive_report import (
     _signal_counts,
 )
 from baseline_score_strategy import format_rule_name_cn, rolling_zscore
+from composite_timing_strategies import (
+    CHALLENGER_STRATEGY_ID,
+    PRIMARY_STRATEGY_ID,
+)
 from reporting import _state_direction_score, score_signal_points_for_advisor
 from timing_config import (
     CODE_COL,
@@ -40,6 +46,24 @@ from timing_config import (
     STATE_FLAT,
     STATE_LONG,
 )
+
+
+COMPOSITE_STRATEGY_META: dict[str, dict[str, Any]] = {
+    PRIMARY_STRATEGY_ID: {
+        "name": "类别等权两速复合策略",
+        "weighting": "四类单因子各分配 25% 权重，再在类别内部等权分配。",
+        "rebalance": "以周频综合信号作为稳定锚；日度综合分数达到 +0.25 或 -0.25 时，允许周中提前开仓或平仓。",
+        "execution": "所有信号在收盘后确认，并于下一交易日执行；日度分数处于 (-0.25, +0.25) 时保持现有仓位。",
+        "strong_threshold": 0.25,
+    },
+    CHALLENGER_STRATEGY_ID: {
+        "name": "开仓频率平方根倒数复合策略",
+        "weighting": "单规则权重与截至 2020-12-31 训练期年均开仓频率的平方根倒数成正比，并归一化为 100%。",
+        "rebalance": "每周末计算频率加权综合分数；分数大于 0 时持仓，小于或等于 0 时空仓。",
+        "execution": "周末信号在下一交易日执行；训练期权重保持固定，不使用后续评估期数据重新拟合。",
+        "strong_threshold": None,
+    },
+}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -644,6 +668,306 @@ def _selected_positions_to_equity_curve(positions_df: pd.DataFrame, row: pd.Seri
     return group
 
 
+def _prepare_composite_daily(
+    daily_df: pd.DataFrame,
+    strategy_id: str,
+    input_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if daily_df.empty or "strategy_id" not in daily_df.columns:
+        return pd.DataFrame()
+    group = daily_df[daily_df["strategy_id"].astype(str).eq(strategy_id)].copy()
+    if group.empty or DATE_COL not in group.columns:
+        return pd.DataFrame()
+    group[DATE_COL] = pd.to_datetime(group[DATE_COL], errors="coerce")
+    group = group.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
+    numeric_columns = [
+        "composite_score",
+        "weekly_anchor_score",
+        "exposure",
+        "benchmark_return",
+        "net_return",
+        "benchmark_equity",
+        "net_equity",
+    ]
+    for column in numeric_columns:
+        if column in group.columns:
+            group[column] = pd.to_numeric(group[column], errors="coerce")
+    if "benchmark_equity" not in group.columns and "benchmark_return" in group.columns:
+        group["benchmark_equity"] = group["benchmark_return"].fillna(0.0).add(1.0).cumprod()
+    if "net_equity" not in group.columns and "net_return" in group.columns:
+        group["net_equity"] = group["net_return"].fillna(0.0).add(1.0).cumprod()
+    if {"net_equity", "benchmark_equity"}.issubset(group.columns):
+        group["excess_equity"] = group["net_equity"].div(
+            group["benchmark_equity"].replace(0.0, np.nan)
+        )
+
+    if PRICE_COL not in group.columns and not input_df.empty and {DATE_COL, PRICE_COL}.issubset(input_df.columns):
+        price = input_df.copy()
+        price[DATE_COL] = pd.to_datetime(price[DATE_COL], errors="coerce")
+        if CODE_COL in price.columns and CODE_COL in group.columns and not group[CODE_COL].dropna().empty:
+            instrument_code = str(group[CODE_COL].dropna().iloc[0])
+            price = price[price[CODE_COL].astype(str).eq(instrument_code)]
+        price = price[[DATE_COL, PRICE_COL]].dropna(subset=[DATE_COL]).drop_duplicates(DATE_COL, keep="last")
+        price[PRICE_COL] = pd.to_numeric(price[PRICE_COL], errors="coerce")
+        group = group.merge(price, on=DATE_COL, how="left", validate="one_to_one")
+    return group
+
+
+def _prepare_composite_trades(trades_df: pd.DataFrame, strategy_id: str) -> pd.DataFrame:
+    if trades_df.empty or "strategy_id" not in trades_df.columns:
+        return pd.DataFrame()
+    group = trades_df[trades_df["strategy_id"].astype(str).eq(strategy_id)].copy()
+    for column in ["signal_date", "execution_date"]:
+        if column in group.columns:
+            group[column] = pd.to_datetime(group[column], errors="coerce")
+    if "execution_date" in group.columns:
+        group = group.dropna(subset=["execution_date"]).sort_values("execution_date").reset_index(drop=True)
+    if "trigger_source" in group.columns:
+        group["trigger_source_cn"] = group["trigger_source"].replace(
+            {
+                "weekly_anchor": "周频锚",
+                "intraweek_strong_event": "周中强事件",
+            }
+        )
+    else:
+        group["trigger_source_cn"] = "策略信号"
+    return group
+
+
+def _composite_long_spans(daily: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if daily.empty or "exposure" not in daily.columns:
+        return []
+    long_state = pd.to_numeric(daily["exposure"], errors="coerce").fillna(0.0).gt(0.5).to_numpy()
+    if not long_state.any():
+        return []
+    starts = np.flatnonzero(long_state & np.r_[True, ~long_state[:-1]])
+    ends = np.flatnonzero(long_state & np.r_[~long_state[1:], True])
+    dates = pd.to_datetime(daily[DATE_COL]).to_numpy()
+    return [(pd.Timestamp(dates[start]), pd.Timestamp(dates[end])) for start, end in zip(starts, ends)]
+
+
+def _make_composite_strategy_charts(
+    daily: pd.DataFrame,
+    trades: pd.DataFrame,
+    strategy_name: str,
+    strong_threshold: float | None,
+) -> str:
+    if daily.empty:
+        return "<div class='chart-error'>暂无可用的复合策略日度数据。</div>"
+    font = dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)
+    layout_common = dict(
+        template="plotly_white",
+        font=font,
+        hoverlabel=dict(font=font),
+        hovermode="x unified",
+        margin=dict(l=54, r=42, t=34, b=36),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    )
+
+    price_column = PRICE_COL if PRICE_COL in daily.columns and daily[PRICE_COL].notna().any() else "benchmark_equity"
+    price_label = "收盘价" if price_column == PRICE_COL else "基准净值"
+    fig_signal = go.Figure()
+    fig_signal.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily[price_column],
+            name=price_label,
+            mode="lines",
+            line=dict(color="#4C78A8", width=1.5),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>{price_label}=%{{y:.4f}}<extra></extra>",
+        )
+    )
+    for start, end in _composite_long_spans(daily):
+        fig_signal.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(239,68,68,0.10)",
+            line_width=0,
+            layer="below",
+        )
+    if not trades.empty and "execution_date" in trades.columns:
+        marker_values = daily[[DATE_COL, price_column]].rename(
+            columns={DATE_COL: "execution_date", price_column: "marker_value"}
+        )
+        marked = trades.merge(marker_values, on="execution_date", how="left", validate="many_to_one")
+        for side, name, symbol, color in [
+            ("entry", "开仓点", "triangle-up", "#169B62"),
+            ("exit", "平仓点", "triangle-down", "#D62728"),
+        ]:
+            subset = marked[marked.get("trade_side", pd.Series(index=marked.index, dtype=str)).eq(side)].copy()
+            if subset.empty:
+                continue
+            signal_text = subset.get("signal_date", pd.Series(pd.NaT, index=subset.index)).dt.strftime("%Y-%m-%d").fillna("--")
+            trigger_text = subset.get("trigger_source_cn", pd.Series("策略信号", index=subset.index)).astype(str)
+            customdata = np.column_stack([signal_text.to_numpy(), trigger_text.to_numpy()])
+            fig_signal.add_trace(
+                go.Scatter(
+                    x=subset["execution_date"],
+                    y=subset["marker_value"],
+                    name=name,
+                    mode="markers",
+                    marker=dict(symbol=symbol, size=10, color=color, line=dict(color="white", width=0.7)),
+                    customdata=customdata,
+                    hovertemplate=(
+                        "%{x|%Y-%m-%d}<br>执行值=%{y:.4f}"
+                        "<br>信号日=%{customdata[0]}<br>来源=%{customdata[1]}<extra></extra>"
+                    ),
+                )
+            )
+    fig_signal.update_layout(**layout_common, height=360)
+    fig_signal.update_yaxes(title_text=price_label)
+
+    fig_score = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_score.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["composite_score"],
+            name="日度/复合分数",
+            mode="lines",
+            line=dict(color="#7C3AED", width=1.7),
+            hovertemplate="%{x|%Y-%m-%d}<br>复合分数=%{y:.4f}<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig_score.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["weekly_anchor_score"],
+            name="周频锚分数",
+            mode="lines",
+            line=dict(color="#F59E0B", width=1.4, dash="dash"),
+            hovertemplate="%{x|%Y-%m-%d}<br>周频锚=%{y:.4f}<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig_score.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["exposure"],
+            name="仓位",
+            mode="lines",
+            line=dict(color="#0F766E", width=1.4, shape="hv"),
+            fill="tozeroy",
+            fillcolor="rgba(15,118,110,0.08)",
+            hovertemplate="%{x|%Y-%m-%d}<br>仓位=%{y:.0%}<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+    fig_score.add_hline(y=0.0, line_width=0.9, line_dash="dot", line_color="#667085", secondary_y=False)
+    if strong_threshold is not None:
+        for threshold in [strong_threshold, -strong_threshold]:
+            fig_score.add_hline(
+                y=threshold,
+                line_width=0.9,
+                line_dash="dot",
+                line_color="#DC2626",
+                secondary_y=False,
+            )
+    fig_score.update_layout(**layout_common, height=360)
+    fig_score.update_yaxes(title_text="复合分数", secondary_y=False)
+    fig_score.update_yaxes(title_text="仓位", range=[-0.05, 1.05], tickformat=".0%", secondary_y=True)
+
+    fig_equity = go.Figure()
+    fig_equity.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["net_equity"],
+            name="策略净值",
+            mode="lines",
+            line=dict(color="#1D3557", width=1.9),
+            hovertemplate="%{x|%Y-%m-%d}<br>策略净值=%{y:.4f}<extra></extra>",
+        )
+    )
+    fig_equity.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["benchmark_equity"],
+            name="中证全指基准",
+            mode="lines",
+            line=dict(color="#94A3B8", width=1.5),
+            hovertemplate="%{x|%Y-%m-%d}<br>基准净值=%{y:.4f}<extra></extra>",
+        )
+    )
+    fig_equity.add_hline(y=1.0, line_width=0.9, line_dash="dot", line_color="#777777")
+    fig_equity.update_layout(**layout_common, height=350)
+    fig_equity.update_yaxes(title_text="累计净值")
+
+    fig_excess = go.Figure()
+    fig_excess.add_trace(
+        go.Scatter(
+            x=daily[DATE_COL],
+            y=daily["excess_equity"],
+            name="超额净值",
+            mode="lines",
+            line=dict(color="#C1121F", width=1.9),
+            fill="tozeroy",
+            fillcolor="rgba(193,18,31,0.07)",
+            hovertemplate="%{x|%Y-%m-%d}<br>超额净值=%{y:.4f}<extra></extra>",
+        )
+    )
+    fig_excess.add_hline(y=1.0, line_width=0.9, line_dash="dot", line_color="#777777")
+    fig_excess.update_layout(**layout_common, height=320)
+    fig_excess.update_yaxes(title_text="策略 / 基准")
+
+    return (
+        "<div class='composite-chart-stack'>"
+        "<div class='plot-panel'><div class='plot-panel-title'>1. 价格、持仓区间与开平仓信号</div>"
+        f"{_fig_html(fig_signal, height=360)}</div>"
+        "<div class='plot-panel'><div class='plot-panel-title'>2. 复合分数、周频锚与仓位</div>"
+        f"{_fig_html(fig_score, height=360)}</div>"
+        "<div class='plot-panel'><div class='plot-panel-title'>3. 历史策略净值与基准净值</div>"
+        f"{_fig_html(fig_equity, height=350)}</div>"
+        "<div class='plot-panel'><div class='plot-panel-title'>4. 历史超额净值曲线</div>"
+        f"{_fig_html(fig_excess, height=320)}</div>"
+        "</div>"
+    )
+
+
+def _build_composite_strategy_views(
+    input_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    trades_df: pd.DataFrame,
+    status_df: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    views: list[dict[str, Any]] = []
+    for strategy_id, meta in COMPOSITE_STRATEGY_META.items():
+        daily = _prepare_composite_daily(daily_df, strategy_id, input_df)
+        if daily.empty:
+            continue
+        trades = _prepare_composite_trades(trades_df, strategy_id)
+        summary_rows = (
+            summary_df[summary_df["strategy_id"].astype(str).eq(strategy_id)]
+            if not summary_df.empty and "strategy_id" in summary_df.columns
+            else pd.DataFrame()
+        )
+        status_rows = (
+            status_df[status_df["strategy_id"].astype(str).eq(strategy_id)]
+            if not status_df.empty and "strategy_id" in status_df.columns
+            else pd.DataFrame()
+        )
+        summary = summary_rows.iloc[0].to_dict() if not summary_rows.empty else {}
+        status = status_rows.iloc[0].to_dict() if not status_rows.empty else daily.iloc[-1].to_dict()
+        views.append(
+            {
+                "strategy_id": strategy_id,
+                "name": meta["name"],
+                "weighting": meta["weighting"],
+                "rebalance": meta["rebalance"],
+                "execution": meta["execution"],
+                "summary": summary,
+                "status": status,
+                "chart_html": _make_composite_strategy_charts(
+                    daily,
+                    trades,
+                    str(meta["name"]),
+                    meta.get("strong_threshold"),
+                ),
+            }
+        )
+    return views
+
+
 def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = None, report_title: str = "宽基择时信号报告") -> dict[str, Any]:
     input_dir = Path(input_dir)
     results_dir = input_dir / "results"
@@ -714,6 +1038,38 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         ],
         optional=True,
     )
+    composite_daily_df = _read_csv(
+        input_dir,
+        [
+            "results/composite_timing_strategies/composite_strategy_daily.csv",
+            "composite_timing_strategies/composite_strategy_daily.csv",
+        ],
+        optional=True,
+    )
+    composite_summary_df = _read_csv(
+        input_dir,
+        [
+            "results/composite_timing_strategies/composite_strategy_summary.csv",
+            "composite_timing_strategies/composite_strategy_summary.csv",
+        ],
+        optional=True,
+    )
+    composite_trades_df = _read_csv(
+        input_dir,
+        [
+            "results/composite_timing_strategies/composite_strategy_trades.csv",
+            "composite_timing_strategies/composite_strategy_trades.csv",
+        ],
+        optional=True,
+    )
+    composite_status_df = _read_csv(
+        input_dir,
+        [
+            "results/composite_timing_strategies/composite_strategy_latest_status.csv",
+            "composite_timing_strategies/composite_strategy_latest_status.csv",
+        ],
+        optional=True,
+    )
     signal_points_state_df = _read_csv(
         input_dir,
         [
@@ -732,6 +1088,13 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
     if not selected_rule_summary_df.empty and "excess_annual_return" in selected_rule_summary_df.columns:
         selected_rule_summary_df = selected_rule_summary_df.sort_values("excess_annual_return", ascending=False).reset_index(drop=True)
     rule_pair_signal_overview = _selected_rule_latest_signal_overview(selected_rule_status_df, selected_rule_summary_df)
+    composite_strategy_views = _build_composite_strategy_views(
+        input_df,
+        composite_daily_df,
+        composite_summary_df,
+        composite_trades_df,
+        composite_status_df,
+    )
 
     strategy_plot_html = ""
     strategy_z20_html = ""
@@ -832,6 +1195,7 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         "strategy_z20_html": strategy_z20_html,
         "rule_pair_cards": rule_pair_cards,
         "rule_pair_signal_overview": rule_pair_signal_overview,
+        "composite_strategy_views": composite_strategy_views,
         "bullish_structure": bullish_structure,
         "bearish_structure": bearish_structure,
     }
@@ -851,6 +1215,112 @@ def _render_structure_rows(rows: list[dict[str, Any]], label_key: str) -> str:
             "</tr>"
         )
     return "".join(parts)
+
+
+def _format_date_value(value: Any) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "--"
+        return str(pd.Timestamp(value).date())
+    except Exception:
+        return "--"
+
+
+def _render_composite_logic(view: dict[str, Any]) -> str:
+    return f"""
+<div class="composite-logic-card">
+  <div class="composite-logic-title">{_escape(view.get('name'))}</div>
+  <div class="composite-logic-grid">
+    <div><span>加权方式</span><p>{_escape(view.get('weighting'))}</p></div>
+    <div><span>调仓频率与触发</span><p>{_escape(view.get('rebalance'))}</p></div>
+    <div><span>执行规则</span><p>{_escape(view.get('execution'))}</p></div>
+  </div>
+</div>
+"""
+
+
+def _render_composite_status(view: dict[str, Any]) -> str:
+    status = view.get("status", {}) or {}
+    exposure = _safe_float(status.get("exposure"))
+    exposure = exposure if np.isfinite(exposure) else 0.0
+    state_label = "持仓" if exposure > 0.5 else "空仓"
+    state_class = "pill-bullish" if exposure > 0.5 else "pill-bearish"
+    return f"""
+<div class="composite-current-panel">
+  <div class="composite-section-title">当前信号状态</div>
+  <div class="composite-current-grid">
+    <div class="composite-current-card"><span>最新日期</span><b>{_format_date_value(status.get(DATE_COL))}</b></div>
+    <div class="composite-current-card"><span>当前方向</span><b class="keyword-pill {state_class}">{state_label}</b></div>
+    <div class="composite-current-card"><span>当前仓位</span><b>{exposure:.0%}</b></div>
+    <div class="composite-current-card"><span>日度/复合分数</span><b>{_format_float(status.get('composite_score'), 4)}</b></div>
+    <div class="composite-current-card"><span>周频锚分数</span><b>{_format_float(status.get('weekly_anchor_score'), 4)}</b></div>
+    <div class="composite-current-card"><span>最近开仓</span><b>{_format_date_value(status.get('latest_entry_date'))}</b></div>
+    <div class="composite-current-card"><span>最近平仓</span><b>{_format_date_value(status.get('latest_exit_date'))}</b></div>
+  </div>
+</div>
+"""
+
+
+def _render_composite_metrics(view: dict[str, Any]) -> str:
+    summary = view.get("summary", {}) or {}
+    entry_count = int(_safe_float(summary.get("entry_count"))) if np.isfinite(_safe_float(summary.get("entry_count"))) else 0
+    exit_count = int(_safe_float(summary.get("exit_count"))) if np.isfinite(_safe_float(summary.get("exit_count"))) else 0
+    rows = [
+        ("年化收益", _format_pct_value(summary.get("annual_return"), 2)),
+        ("年化波动", _format_pct_value(summary.get("annual_volatility"), 2)),
+        ("Sharpe", _format_float(summary.get("sharpe"), 2)),
+        ("最大回撤", _format_pct_value(summary.get("max_drawdown"), 2)),
+        ("Calmar", _format_float(summary.get("calmar"), 2)),
+        ("年化换手", _format_float(summary.get("annual_turnover"), 2)),
+        ("平均仓位", _format_pct_value(summary.get("mean_exposure"), 1)),
+        ("开仓 / 平仓", f"{entry_count} / {exit_count}"),
+        ("平均持有天数", _format_float(summary.get("mean_holding_days"), 1)),
+        ("期末净值", _format_float(summary.get("final_equity"), 3)),
+    ]
+    cards = "".join(
+        f"<div class='composite-metric-card'><span>{_escape(label)}</span><b>{_escape(value)}</b></div>"
+        for label, value in rows
+    )
+    return f"""
+<div class="composite-performance-panel">
+  <div class="composite-section-title">历史表现</div>
+  <div class="composite-metric-grid">{cards}</div>
+  <p class="footnote">回测口径：策略信号在下一交易日执行，收益已扣除单边 5bp 换仓成本；历史表现不代表未来收益。</p>
+</div>
+"""
+
+
+def _render_composite_strategy_module(views: list[dict[str, Any]]) -> str:
+    if not views:
+        return """
+<div class="card">
+  <h2>复合策略</h2>
+  <div class="chart-error">尚未生成复合策略结果，请先运行 composite-strategies。</div>
+</div>
+"""
+    buttons: list[str] = []
+    panels: list[str] = []
+    for index, view in enumerate(views):
+        active = " active" if index == 0 else ""
+        panel_id = f"composite-strategy-panel-{index}"
+        buttons.append(
+            f"<button class='composite-tab-btn{active}' "
+            f"onclick=\"switchCompositeStrategy(event,'{panel_id}')\">{_escape(view.get('name'))}</button>"
+        )
+        panels.append(
+            f"<div id='{panel_id}' class='composite-strategy-panel{active}'>"
+            f"{_render_composite_logic(view)}"
+            f"{_render_composite_status(view)}"
+            f"{view.get('chart_html', '')}"
+            f"{_render_composite_metrics(view)}"
+            "</div>"
+        )
+    return (
+        "<div class='composite-inner-tabs'>"
+        + "".join(buttons)
+        + "</div>"
+        + "".join(panels)
+    )
 
 
 def _render_strategy_status(status: dict[str, Any]) -> str:
@@ -1241,6 +1711,19 @@ def render_html(v: dict[str, Any]) -> str:
     strategy_status_html = _render_strategy_status(v.get("strategy_status", {}))
     z20_stats_html = _render_z20_stats(v.get("strategy_z20_stats", []))
     rule_pair_signal_overview_html = _render_rule_pair_signal_overview(v.get("rule_pair_signal_overview", {}))
+    composite_views = v.get("composite_strategy_views", []) or []
+    composite_module_html = _render_composite_strategy_module(composite_views)
+    composite_exposures = []
+    for composite_view in composite_views[:2]:
+        value = _safe_float((composite_view.get("status", {}) or {}).get("exposure"))
+        composite_exposures.append(value if np.isfinite(value) else 0.0)
+    while len(composite_exposures) < 2:
+        composite_exposures.append(0.0)
+    composite_direction = (
+        "方向一致"
+        if len(composite_views) >= 2 and (composite_exposures[0] > 0.5) == (composite_exposures[1] > 0.5)
+        else "方向分歧" if len(composite_views) >= 2 else "等待结果"
+    )
     status = v.get("strategy_status", {}) or {}
     score_position_label = str(status.get("position_label", "--") or "--")
     score_position_class = str(status.get("position_class", "pill-watch") or "pill-watch")
@@ -1304,17 +1787,19 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Mic
 .header h1{{font-size:28px;margin-bottom:8px}}
 .header .date{{font-size:14px;opacity:.86}}
 .container{{max-width:1440px;margin:0 auto;padding:20px}}
-.overview-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:24px}}
+.overview-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:24px}}
 .overview-card{{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-top:4px solid #d0d5dd;min-height:210px;display:flex;flex-direction:column;gap:12px}}
 .overview-card.event-card{{border-top-color:#7B2CBF}}
 .overview-card.score-card{{border-top-color:#2563eb}}
 .overview-card.rule-card{{border-top-color:#7c3aed}}
+.overview-card.composite-card{{border-top-color:#0f766e}}
 .overview-title{{display:flex;align-items:center;justify-content:space-between;gap:10px}}
 .overview-title h2{{font-size:17px;color:#101828;margin:0}}
 .overview-badge{{display:inline-block;border-radius:999px;padding:5px 13px;color:#fff;font-size:14px;font-weight:800;white-space:nowrap}}
 .overview-badge.event-badge{{background:#7B2CBF}}
 .overview-badge.score-badge{{background:#2563eb}}
 .overview-badge.rule-badge{{background:#7c3aed}}
+.overview-badge.composite-badge{{background:#0f766e}}
 .overview-metrics{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}}
 .overview-metric{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:9px 8px;text-align:center;min-height:62px;display:flex;flex-direction:column;justify-content:center}}
 .overview-metric b{{font-size:18px;color:#1f2937}}
@@ -1455,9 +1940,31 @@ tr:hover{{background:#f8f9fa}}
 .plot-panel{{display:block;width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:0 0 12px 0}}
 .plot-panel-title{{font-size:13px;font-weight:700;color:#334155;background:#f8fafc;border-bottom:1px solid #e5e7eb;padding:8px 12px}}
 .plot-panel .plotly-graph-div{{border:0!important}}
+.composite-inner-tabs{{display:flex;gap:10px;flex-wrap:wrap;background:#eef6f5;border:1px solid #cde5e1;border-radius:10px;padding:10px;margin:0 0 16px 0}}
+.composite-tab-btn{{flex:1;min-width:260px;border:1px solid #b8d8d2;background:#fff;color:#0f5f57;border-radius:8px;padding:11px 16px;font-size:14px;font-weight:800;cursor:pointer}}
+.composite-tab-btn:hover{{background:#f0fdfa}}
+.composite-tab-btn.active{{background:#0f766e;border-color:#0f766e;color:#fff;box-shadow:0 3px 10px rgba(15,118,110,.20)}}
+.composite-strategy-panel{{display:none}}
+.composite-strategy-panel.active{{display:block}}
+.composite-logic-card{{background:linear-gradient(135deg,#f0fdfa,#f8fafc);border:1px solid #bfe3dc;border-left:5px solid #0f766e;border-radius:10px;padding:16px 18px;margin:0 0 16px 0}}
+.composite-logic-title{{font-size:17px;font-weight:900;color:#134e4a;margin-bottom:12px}}
+.composite-logic-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.composite-logic-grid>div{{background:#fff;border:1px solid #dce9e7;border-radius:8px;padding:11px 12px}}
+.composite-logic-grid span{{display:block;font-size:12px;font-weight:800;color:#0f766e;margin-bottom:5px}}
+.composite-logic-grid p{{font-size:13px;color:#344054;line-height:1.65;margin:0}}
+.composite-current-panel,.composite-performance-panel{{background:#fbfcff;border:1px solid #e5e7eb;border-radius:10px;padding:15px 16px;margin:0 0 16px 0}}
+.composite-performance-panel{{margin-top:16px}}
+.composite-section-title{{font-size:15px;font-weight:900;color:#1f2937;margin-bottom:10px}}
+.composite-current-grid{{display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:9px}}
+.composite-current-card,.composite-metric-card{{background:#fff;border:1px solid #e8edf2;border-radius:8px;padding:10px;text-align:center;min-height:68px;display:flex;flex-direction:column;justify-content:center;gap:4px}}
+.composite-current-card span,.composite-metric-card span{{font-size:11.5px;color:#667085}}
+.composite-current-card b,.composite-metric-card b{{font-size:15px;color:#1f2937}}
+.composite-metric-grid{{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px}}
+.composite-chart-stack{{display:flex;flex-direction:column;gap:14px}}
 .footnote{{font-size:12px;color:#667085;line-height:1.6;margin:10px 0 0 0}}
 .chart-error{{padding:16px;border:1px solid #f3c7c7;background:#fff4f4;color:#b42318;border-radius:8px;font-size:13px}}
-@media(max-width:900px){{.overview-grid{{grid-template-columns:1fr}}.rule-pair-grid{{grid-template-columns:1fr}}.signal-stats{{flex-direction:column;align-items:center}}}}
+@media(max-width:1200px){{.overview-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.composite-current-grid{{grid-template-columns:repeat(4,minmax(120px,1fr))}}.composite-metric-grid{{grid-template-columns:repeat(3,minmax(120px,1fr))}}}}
+@media(max-width:900px){{.overview-grid{{grid-template-columns:1fr}}.rule-pair-grid{{grid-template-columns:1fr}}.signal-stats{{flex-direction:column;align-items:center}}.composite-logic-grid{{grid-template-columns:1fr}}.composite-current-grid,.composite-metric-grid{{grid-template-columns:repeat(2,minmax(120px,1fr))}}}}
 @media(max-width:1100px){{.rule-signal-columns{{grid-template-columns:1fr}}.score-mini-grid{{grid-template-columns:repeat(2,minmax(140px,1fr))}}}}
 """
 
@@ -1525,12 +2032,28 @@ tr:hover{{background:#f8f9fa}}
         <span class="keyword-pill pill-bearish">最近看空：{_escape(rule_latest_bearish)}</span>
       </div>
     </div>
+    <div class="overview-card composite-card">
+      <div class="overview-title">
+        <h2>复合策略</h2>
+        <span class="overview-badge composite-badge">{len(composite_views)} 个策略</span>
+      </div>
+      <div class="overview-metrics">
+        <div class="overview-metric"><b>{composite_exposures[0]:.0%}</b><span>类别等权两速</span></div>
+        <div class="overview-metric"><b>{composite_exposures[1]:.0%}</b><span>频率倒数加权</span></div>
+        <div class="overview-metric"><b>{_escape(composite_direction)}</b><span>当前方向</span></div>
+      </div>
+      <div class="overview-note">
+        <span class="keyword-pill pill-core">类别等权两速复合</span>
+        <span class="keyword-pill pill-risk">开仓频率平方根倒数复合</span>
+      </div>
+    </div>
   </div>
 
   <div class="module-tabs">
     <button class="module-tab-btn active" onclick="switchModule(event,'event-module-panel')">事件驱动模块</button>
     <button class="module-tab-btn" onclick="switchModule(event,'score-module-panel')">综合打分模块</button>
     <button class="module-tab-btn" onclick="switchModule(event,'rule-module-panel')">单因子规则模块</button>
+    <button class="module-tab-btn" onclick="switchModule(event,'composite-module-panel')">复合策略模块</button>
   </div>
 
   <div id="event-module-panel" class="module-panel active event-module">
@@ -1569,6 +2092,15 @@ tr:hover{{background:#f8f9fa}}
     <div class="rule-pair-grid">{rule_pair_cards}</div>
   </div>
   </div>
+
+  <div id="composite-module-panel" class="module-panel">
+    <h2 class="module-heading">复合策略模块</h2>
+    <p class="module-intro">复合策略模块把正式保留的单因子持仓规则组合成两套可执行策略。两个策略地位并列，先说明加权、调仓与次日执行逻辑，再分别展示当前信号、开平仓记录、历史净值、超额曲线和绩效。</p>
+    <div class="card">
+      <h2>复合策略历史信号与表现</h2>
+      {composite_module_html}
+    </div>
+  </div>
 </div>
 <script>
 function switchModule(e,t) {{
@@ -1580,6 +2112,21 @@ function switchModule(e,t) {{
   }});
   document.getElementById(t).classList.add('active');
   e.target.classList.add('active');
+  setTimeout(function() {{
+    document.querySelectorAll('#' + t + ' .plotly-graph-div').forEach(function(el) {{
+      if (window.Plotly) {{ Plotly.Plots.resize(el); }}
+    }});
+  }}, 80);
+}}
+function switchCompositeStrategy(e,t) {{
+  document.querySelectorAll('#composite-module-panel .composite-strategy-panel').forEach(function(el) {{
+    el.classList.remove('active');
+  }});
+  document.querySelectorAll('#composite-module-panel .composite-tab-btn').forEach(function(el) {{
+    el.classList.remove('active');
+  }});
+  document.getElementById(t).classList.add('active');
+  e.currentTarget.classList.add('active');
   setTimeout(function() {{
     document.querySelectorAll('#' + t + ' .plotly-graph-div').forEach(function(el) {{
       if (window.Plotly) {{ Plotly.Plots.resize(el); }}
