@@ -330,7 +330,7 @@ def _latest_status(
     strategy_trades = trades[trades["strategy_id"].eq(strategy_id)]
     entries = strategy_trades[strategy_trades["trade_side"].eq("entry")]
     exits = strategy_trades[strategy_trades["trade_side"].eq("exit")]
-    if strategy_id == PRIMARY_STRATEGY_ID and abs(float(latest["composite_score"])) < float(strong_threshold):
+    if strong_threshold is not None and abs(float(latest["composite_score"])) < float(strong_threshold):
         state_reason = "weekly anchor retained; daily score remains inside the strong-event hold band"
     else:
         state_reason = "latest weekly decision or composite threshold"
@@ -367,7 +367,7 @@ def _signal_markdown(latest_status: pd.DataFrame) -> str:
         [
             "",
             "- 主策略：四类因子各占 25%，周频锚定；日度分数达到 ±0.25 时在下一交易日提前调整。",
-            "- 挑战者：规则权重与训练期年均开仓频率平方根倒数成正比，周频判断仓位。",
+            "- 挑战者：规则权重与训练期年均开仓频率平方根倒数成正比；周频锚定，日度分数达到 ±0.25 时提前调整。",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -408,8 +408,14 @@ def run_composite_timing_strategies(
         strong_event_threshold,
     )
     challenger_raw = _weighted_score(scores, challenger_weights)
+    challenger_daily_score = _applied_daily_score(challenger_raw)
     challenger_weekly_score = _applied_weekly_score(challenger_raw, weekly_dates)
-    challenger_exposure = challenger_weekly_score.gt(0.0).astype(float).rename("exposure")
+    challenger_exposure = _two_speed_exposure(
+        challenger_daily_score,
+        challenger_weekly_score,
+        weekly_dates,
+        strong_event_threshold,
+    )
 
     primary_daily = _strategy_daily(
         PRIMARY_STRATEGY_ID,
@@ -425,7 +431,7 @@ def run_composite_timing_strategies(
     challenger_daily = _strategy_daily(
         CHALLENGER_STRATEGY_ID,
         "challenger",
-        challenger_weekly_score,
+        challenger_daily_score,
         challenger_weekly_score,
         challenger_exposure,
         benchmark_return,
@@ -445,7 +451,7 @@ def run_composite_timing_strategies(
     latest_status = pd.DataFrame(
         [
             _latest_status(primary_daily, trades, strong_event_threshold),
-            _latest_status(challenger_daily, trades, None),
+            _latest_status(challenger_daily, trades, strong_event_threshold),
         ]
     )
 
@@ -468,9 +474,9 @@ def run_composite_timing_strategies(
                 "strategy_id": CHALLENGER_STRATEGY_ID,
                 "strategy_role": "challenger",
                 "weighting": "normalized_inverse_sqrt_training_entry_frequency",
-                "rebalance": "weekly",
-                "open_rule": "weekly_score>0",
-                "close_rule": "weekly_score<=0",
+                "rebalance": "weekly_anchor_plus_daily_strong_event",
+                "open_rule": f"weekly_score>0 or daily_score>={strong_event_threshold:g}",
+                "close_rule": f"weekly_score<=0 or daily_score<=-{strong_event_threshold:g}",
                 "execution": "next_trading_day",
             },
         ]

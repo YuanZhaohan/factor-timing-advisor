@@ -59,9 +59,9 @@ COMPOSITE_STRATEGY_META: dict[str, dict[str, Any]] = {
     CHALLENGER_STRATEGY_ID: {
         "name": "开仓频率平方根倒数复合策略",
         "weighting": "单规则权重与截至 2020-12-31 训练期年均开仓频率的平方根倒数成正比，并归一化为 100%。",
-        "rebalance": "每周末计算频率加权综合分数；分数大于 0 时持仓，小于或等于 0 时空仓。",
-        "execution": "周末信号在下一交易日执行；训练期权重保持固定，不使用后续评估期数据重新拟合。",
-        "strong_threshold": None,
+        "rebalance": "以周频频率加权信号作为稳定锚；日度频率加权分数达到 +0.25 或 -0.25 时，允许周中提前开仓或平仓。",
+        "execution": "所有信号在收盘后确认，并于下一交易日执行；训练期权重保持固定，不使用后续评估期数据重新拟合。",
+        "strong_threshold": 0.25,
     },
 }
 
