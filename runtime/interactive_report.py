@@ -174,43 +174,62 @@ def _make_recent_signal_chart_html(
 
     recent_dates = price["plot_date"]
     recent = sig[sig[SIGNAL_DATE_COL].dt.normalize().isin(set(recent_dates))].copy()
+    if "term_role" not in recent.columns:
+        recent["term_role"] = np.where(
+            recent[SIGNAL_VALUE_COL].astype(str).eq("1"),
+            "追涨",
+            "快速逃顶",
+        )
     daily = (
         recent.assign(
-            open_count=recent[SIGNAL_VALUE_COL].astype(str).eq("1"),
-            close_count=recent[SIGNAL_VALUE_COL].astype(str).eq("-1"),
+            chase_count=recent["term_role"].astype(str).eq("追涨"),
+            bottom_count=recent["term_role"].astype(str).eq("抄底"),
+            fast_exit_count=recent["term_role"].astype(str).eq("快速逃顶"),
+            early_warning_count=recent["term_role"].astype(str).eq("预先指示"),
         )
         .assign(plot_date=lambda x: x[SIGNAL_DATE_COL].dt.normalize())
         .groupby("plot_date", as_index=False)
-        .agg(open_count=("open_count", "sum"), close_count=("close_count", "sum"))
+        .agg(
+            chase_count=("chase_count", "sum"),
+            bottom_count=("bottom_count", "sum"),
+            fast_exit_count=("fast_exit_count", "sum"),
+            early_warning_count=("early_warning_count", "sum"),
+        )
     )
 
     chart_df = price.merge(daily, on="plot_date", how="left")
-    chart_df[["open_count", "close_count"]] = chart_df[["open_count", "close_count"]].fillna(0)
-    chart_df["net_open_count"] = chart_df["open_count"] - chart_df["close_count"]
-    chart_df["net_open_count_ma5"] = chart_df["net_open_count"].rolling(5, min_periods=1).mean()
-    chart_df["open_count_ma5"] = chart_df["open_count"].rolling(5, min_periods=1).mean()
-    chart_df["close_count_ma5"] = chart_df["close_count"].rolling(5, min_periods=1).mean()
-    chart_df["net_open_count_sum20"] = chart_df["net_open_count"].rolling(20, min_periods=1).sum()
+    role_count_cols = ["chase_count", "bottom_count", "fast_exit_count", "early_warning_count"]
+    chart_df[role_count_cols] = chart_df[role_count_cols].fillna(0)
+    chart_df["long_count"] = chart_df["chase_count"] + chart_df["bottom_count"]
+    chart_df["short_count"] = chart_df["fast_exit_count"] + chart_df["early_warning_count"]
+    chart_df["net_long_count"] = chart_df["long_count"] - chart_df["short_count"]
+    chart_df["net_long_count_ma5"] = chart_df["net_long_count"].rolling(5, min_periods=1).mean()
+    chart_df["net_long_count_sum20"] = chart_df["net_long_count"].rolling(20, min_periods=1).sum()
+    for col in role_count_cols:
+        chart_df[f"{col}_ma5"] = chart_df[col].rolling(5, min_periods=1).mean()
     visible_start_idx = max(0, len(chart_df) - default_visible_days)
     visible_range = [chart_df["plot_date"].iloc[visible_start_idx], chart_df["plot_date"].iloc[-1]]
 
     fig = make_subplots(
-        rows=3,
+        rows=6,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.07,
-        row_heights=[0.38, 0.30, 0.32],
-        specs=[[{"secondary_y": True}], [{"secondary_y": True}], [{"secondary_y": True}]],
+        vertical_spacing=0.035,
+        row_heights=[0.18, 0.18, 0.16, 0.16, 0.16, 0.16],
+        specs=[[{"secondary_y": True}] for _ in range(6)],
     )
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
-            y=chart_df["net_open_count_ma5"],
-            name="净开仓量 5日均线",
+            y=chart_df["net_long_count_ma5"],
+            name="净多头信号 5日均线",
             mode="lines",
             line=dict(color="#7B2CBF", width=1.8),
-            customdata=np.stack([chart_df["net_open_count"].values, chart_df["open_count"].values, chart_df["close_count"].values], axis=1),
-            hovertemplate="%{x|%Y-%m-%d}<br>净开仓量5日均线=%{y:.2f}<br>当日净开仓量=%{customdata[0]:.0f}<br>当日开仓=%{customdata[1]:.0f}<br>当日平仓=%{customdata[2]:.0f}<extra></extra>",
+            customdata=np.stack(
+                [chart_df["net_long_count"].values, chart_df["long_count"].values, chart_df["short_count"].values],
+                axis=1,
+            ),
+            hovertemplate="%{x|%Y-%m-%d}<br>净多头信号5日均线=%{y:.2f}<br>当日净多头=%{customdata[0]:.0f}<br>当日多头=%{customdata[1]:.0f}<br>当日空头=%{customdata[2]:.0f}<extra></extra>",
         ),
         row=1,
         col=1,
@@ -219,15 +238,15 @@ def _make_recent_signal_chart_html(
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
-            y=chart_df["net_open_count_sum20"],
-            name="近20日累计净开仓",
+            y=chart_df["net_long_count_sum20"],
+            name="近20日累计净多头",
             mode="lines",
             line=dict(color="#F59E0B", width=1.9),
             customdata=np.stack(
-                [chart_df["net_open_count_sum20"].values, chart_df["net_open_count"].values, chart_df["open_count"].values, chart_df["close_count"].values],
+                [chart_df["net_long_count"].values, chart_df["long_count"].values, chart_df["short_count"].values],
                 axis=1,
             ),
-            hovertemplate="%{x|%Y-%m-%d}<br>近20日累计净开仓=%{customdata[0]:.0f}<br>当日净开仓=%{customdata[1]:.0f}<br>当日开仓=%{customdata[2]:.0f}<br>当日平仓=%{customdata[3]:.0f}<extra></extra>",
+            hovertemplate="%{x|%Y-%m-%d}<br>近20日累计净多头=%{y:.0f}<br>当日净多头=%{customdata[0]:.0f}<br>当日多头=%{customdata[1]:.0f}<br>当日空头=%{customdata[2]:.0f}<extra></extra>",
         ),
         row=2,
         col=1,
@@ -247,7 +266,7 @@ def _make_recent_signal_chart_html(
         col=1,
         secondary_y=True,
     )
-    for row in (2, 3):
+    for row in (2, 3, 4, 5, 6):
         fig.add_trace(
             go.Scatter(
                 x=chart_df["plot_date"],
@@ -266,12 +285,12 @@ def _make_recent_signal_chart_html(
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
-            y=chart_df["open_count_ma5"],
-            name="开仓数量 5日均线",
+            y=chart_df["bottom_count_ma5"],
+            name="抄底信号 5日均线",
             mode="lines",
-            line=dict(color="#044E7E", width=1.7),
-            customdata=np.stack([chart_df["open_count"].values], axis=1),
-            hovertemplate="%{x|%Y-%m-%d}<br>开仓数量5日均线=%{y:.2f}<br>当日开仓数量=%{customdata[0]:.0f}<extra></extra>",
+            line=dict(color="#F59E0B", width=1.8),
+            customdata=np.stack([chart_df["bottom_count"].values], axis=1),
+            hovertemplate="%{x|%Y-%m-%d}<br>抄底信号5日均线=%{y:.2f}<br>当日抄底信号=%{customdata[0]:.0f}<extra></extra>",
         ),
         row=3,
         col=1,
@@ -280,38 +299,86 @@ def _make_recent_signal_chart_html(
     fig.add_trace(
         go.Scatter(
             x=chart_df["plot_date"],
-            y=chart_df["close_count_ma5"],
-            name="平仓数量 5日均线",
+            y=chart_df["chase_count_ma5"],
+            name="追涨信号 5日均线",
             mode="lines",
-            line=dict(color="#FF3333", width=1.7),
-            customdata=np.stack([chart_df["close_count"].values], axis=1),
-            hovertemplate="%{x|%Y-%m-%d}<br>平仓数量5日均线=%{y:.2f}<br>当日平仓数量=%{customdata[0]:.0f}<extra></extra>",
+            line=dict(color="#D62728", width=1.8),
+            customdata=np.stack([chart_df["chase_count"].values], axis=1),
+            hovertemplate="%{x|%Y-%m-%d}<br>追涨信号5日均线=%{y:.2f}<br>当日追涨信号=%{customdata[0]:.0f}<extra></extra>",
         ),
-        row=3,
+        row=4,
+        col=1,
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df["plot_date"],
+            y=chart_df["fast_exit_count_ma5"],
+            name="快速逃顶 5日均线",
+            mode="lines",
+            line=dict(color="#0B6E4F", width=1.8),
+            customdata=np.stack([chart_df["fast_exit_count"].values], axis=1),
+            hovertemplate="%{x|%Y-%m-%d}<br>快速逃顶5日均线=%{y:.2f}<br>当日快速逃顶=%{customdata[0]:.0f}<extra></extra>",
+        ),
+        row=5,
+        col=1,
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df["plot_date"],
+            y=chart_df["early_warning_count_ma5"],
+            name="预先指示 5日均线",
+            mode="lines",
+            line=dict(color="#2F6BFF", width=1.8),
+            customdata=np.stack([chart_df["early_warning_count"].values], axis=1),
+            hovertemplate="%{x|%Y-%m-%d}<br>预先指示5日均线=%{y:.2f}<br>当日预先指示=%{customdata[0]:.0f}<extra></extra>",
+        ),
+        row=6,
         col=1,
         secondary_y=False,
     )
     fig.add_hline(y=0.0, line_width=0.8, line_dash="dot", line_color="#777777", row=1, col=1)
+    fig.add_hline(y=0.0, line_width=0.8, line_dash="dot", line_color="#777777", row=2, col=1)
     fig.update_layout(
         template="plotly_white",
-        height=720,
+        height=1220,
         margin=dict(l=58, r=45, t=28, b=38),
         font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12),
         hoverlabel=dict(font=dict(family="Microsoft YaHei, PingFang SC, Arial, sans-serif", size=12)),
         hovermode="x unified",
+        hoversubplots="axis",
+        hoverdistance=-1,
+        spikedistance=-1,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     )
-    fig.update_yaxes(title_text="净开仓量 5日均线", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="净多头 5日均线", row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="收盘价", row=1, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="近20日累计净开仓", row=2, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="20日累计净多头", row=2, col=1, secondary_y=False)
     fig.update_yaxes(title_text="收盘价", row=2, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="开仓 / 平仓数量 5日均线", row=3, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="抄底信号", row=3, col=1, secondary_y=False)
     fig.update_yaxes(title_text="收盘价", row=3, col=1, secondary_y=True)
-    fig.update_xaxes(range=visible_range)
+    fig.update_yaxes(title_text="追涨信号", row=4, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="收盘价", row=4, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="快速逃顶", row=5, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="收盘价", row=5, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="预先指示", row=6, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="收盘价", row=6, col=1, secondary_y=True)
+    fig.update_yaxes(autorange=True, fixedrange=False)
+    fig.update_xaxes(
+        range=visible_range,
+        fixedrange=False,
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikedash="dot",
+        spikecolor="#667085",
+        spikethickness=1,
+    )
     return (
         "<div class='recent-signal-figures'>"
-        "<div class='plot-panel'><div class='plot-panel-title'>全历史信号触发：默认显示最近3年</div>"
-        f"{_fig_html(fig, height=720)}"
+        "<div class='plot-panel'><div class='plot-panel-title'>有效信号期限结构：全历史数据，默认显示最近3年</div>"
+        f"{_fig_html(fig, height=1220, auto_y_on_xrange=True)}"
         "</div>"
         "</div>"
     )
@@ -514,7 +581,70 @@ def _enable_date_filter(fig: go.Figure) -> bool:
     return True
 
 
-def _fig_html(fig: go.Figure, height: int | None = None) -> str:
+_VISIBLE_Y_AUTOSCALE_SCRIPT = r"""
+(function () {
+  const graph = document.getElementById('{plot_id}');
+  if (!graph || graph.__visibleYAutoscaleBound) return;
+  graph.__visibleYAutoscaleBound = true;
+
+  const toMillis = (value) => {
+    if (typeof value === 'number') return value;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  };
+  const layoutAxisKey = (traceAxis) => traceAxis === 'y' ? 'yaxis' : `yaxis${traceAxis.slice(1)}`;
+
+  const rescaleVisibleY = () => {
+    const xAxisKeys = Object.keys(graph.layout).filter((key) => /^xaxis\d*$/.test(key));
+    const activeXAxis = xAxisKeys.map((key) => graph.layout[key]).find((axis) => axis && axis.range);
+    const range = activeXAxis && activeXAxis.range;
+    const start = range ? toMillis(range[0]) : -Infinity;
+    const end = range ? toMillis(range[1]) : Infinity;
+    const bounds = {};
+
+    graph.data.forEach((trace) => {
+      if (
+        trace.visible === 'legendonly' || !trace.x || !trace.y ||
+        typeof trace.x.length !== 'number' || typeof trace.y.length !== 'number'
+      ) return;
+      const axisKey = layoutAxisKey(trace.yaxis || 'y');
+      for (let index = 0; index < trace.x.length; index += 1) {
+        const xValue = toMillis(trace.x[index]);
+        const yValue = Number(trace.y[index]);
+        if (!Number.isFinite(xValue) || !Number.isFinite(yValue) || xValue < start || xValue > end) continue;
+        if (!bounds[axisKey]) bounds[axisKey] = [yValue, yValue];
+        bounds[axisKey][0] = Math.min(bounds[axisKey][0], yValue);
+        bounds[axisKey][1] = Math.max(bounds[axisKey][1], yValue);
+      }
+    });
+
+    const updates = {};
+    Object.entries(bounds).forEach(([axisKey, values]) => {
+      const low = values[0];
+      const high = values[1];
+      const span = high - low;
+      const padding = span > 0 ? span * 0.08 : Math.max(Math.abs(high) * 0.05, 1);
+      updates[`${axisKey}.range`] = [low - padding, high + padding];
+      updates[`${axisKey}.autorange`] = false;
+    });
+    if (Object.keys(updates).length) Plotly.relayout(graph, updates);
+  };
+
+  let frameId = null;
+  graph.on('plotly_relayout', (eventData) => {
+    const xChanged = Object.keys(eventData || {}).some(
+      (key) => /^xaxis\d*\.(range|autorange)/.test(key)
+    );
+    if (!xChanged) return;
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = requestAnimationFrame(rescaleVisibleY);
+  });
+  requestAnimationFrame(rescaleVisibleY);
+})();
+"""
+
+
+def _fig_html(fig: go.Figure, height: int | None = None, auto_y_on_xrange: bool = False) -> str:
     has_date_filter = _enable_date_filter(fig)
     if height is not None:
         if has_date_filter:
@@ -525,6 +655,7 @@ def _fig_html(fig: go.Figure, height: int | None = None) -> str:
         full_html=False,
         include_plotlyjs=False,
         config={"displaylogo": False, "responsive": True, "scrollZoom": True},
+        post_script=_VISIBLE_Y_AUTOSCALE_SCRIPT if auto_y_on_xrange else None,
     )
 
 

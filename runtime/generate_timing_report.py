@@ -274,18 +274,23 @@ def _signal_counts_from_df(signals_df: pd.DataFrame, top_n_days: int = 20) -> di
 def _filter_effective_signals_expanding(
     input_df: pd.DataFrame,
     signals_df: pd.DataFrame,
-    horizon: int = 5,
+    immediate_horizon: int = 5,
+    delayed_horizon: int = 20,
     warmup_days: int = 252,
     win_threshold: float = 0.5,
     payoff_threshold: float = 1.0,
+    edge_threshold: float = 0.01,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     meta = {
         "raw_signal_count": int(len(signals_df)) if signals_df is not None else 0,
         "effective_signal_count": 0,
-        "horizon": horizon,
+        "immediate_horizon": immediate_horizon,
+        "delayed_horizon": delayed_horizon,
         "warmup_days": warmup_days,
         "win_threshold": win_threshold,
         "payoff_threshold": payoff_threshold,
+        "edge_threshold": edge_threshold,
+        "role_counts": {},
     }
     required_signals = {SIGNAL_DATE_COL, SIGNAL_INSTRUMENT_COL, SIGNAL_FACTOR_COL, SIGNAL_PATTERN_COL, SIGNAL_VALUE_COL}
     if input_df.empty or signals_df.empty or PRICE_COL not in input_df.columns or not required_signals.issubset(signals_df.columns):
@@ -316,8 +321,9 @@ def _filter_effective_signals_expanding(
         close = pd.to_numeric(group[PRICE_COL], errors="coerce")
         part = group[[CODE_COL, DATE_COL]].copy()
         part["_date_idx"] = np.arange(len(group), dtype=int)
-        part["_known_idx"] = part["_date_idx"] + horizon
-        part["_forward_return"] = close.shift(-horizon) / close - 1.0
+        for horizon in (immediate_horizon, delayed_horizon):
+            part[f"_known_idx_{horizon}"] = part["_date_idx"] + horizon
+            part[f"_forward_return_{horizon}"] = close.shift(-horizon) / close - 1.0
         price_parts.append(part)
     if not price_parts:
         return sig.iloc[0:0].copy(), meta
@@ -334,55 +340,137 @@ def _filter_effective_signals_expanding(
     if sig.empty:
         return sig.iloc[0:0].copy(), meta
     sig["_date_idx"] = sig["_date_idx"].astype(int)
-    sig["_known_idx"] = pd.to_numeric(sig["_known_idx"], errors="coerce")
-    sig["_directional_return"] = np.where(
-        sig[SIGNAL_VALUE_COL].eq(1),
-        sig["_forward_return"],
-        -sig["_forward_return"],
-    )
+    for horizon in (immediate_horizon, delayed_horizon):
+        sig[f"_known_idx_{horizon}"] = pd.to_numeric(sig[f"_known_idx_{horizon}"], errors="coerce")
+        sig[f"_directional_return_{horizon}"] = np.where(
+            sig[SIGNAL_VALUE_COL].eq(1),
+            sig[f"_forward_return_{horizon}"],
+            -sig[f"_forward_return_{horizon}"],
+        )
 
-    pass_mask = np.zeros(len(sig), dtype=bool)
+    term_role = np.full(len(sig), "", dtype=object)
+    selected_horizon = np.full(len(sig), np.nan, dtype=float)
+    selected_win_rate = np.full(len(sig), np.nan, dtype=float)
+    selected_payoff = np.full(len(sig), np.nan, dtype=float)
+    selected_mean_return = np.full(len(sig), np.nan, dtype=float)
     group_cols = [SIGNAL_INSTRUMENT_COL, SIGNAL_FACTOR_COL, SIGNAL_PATTERN_COL, SIGNAL_VALUE_COL]
     for _, group in sig.groupby(group_cols, sort=False):
-        obs = group[group["_directional_return"].notna() & group["_known_idx"].notna()].copy()
-        if obs.empty:
-            continue
-        obs = obs.sort_values("_known_idx")
-        known_idx = obs["_known_idx"].to_numpy(dtype=float)
-        directional = obs["_directional_return"].to_numpy(dtype=float)
-        wins = directional > 0
-        losses = directional < 0
-        cum_count = np.r_[0, np.arange(1, len(obs) + 1)]
-        cum_win_count = np.r_[0, np.cumsum(wins)]
-        cum_loss_count = np.r_[0, np.cumsum(losses)]
-        cum_win_sum = np.r_[0.0, np.cumsum(np.where(wins, directional, 0.0))]
-        cum_loss_sum = np.r_[0.0, np.cumsum(np.where(losses, -directional, 0.0))]
-
+        group_idx = group.index.to_numpy()
         trigger_idx = group["_date_idx"].to_numpy(dtype=float)
-        hist_pos = np.searchsorted(known_idx, trigger_idx, side="left")
-        count = cum_count[hist_pos].astype(float)
-        win_count = cum_win_count[hist_pos].astype(float)
-        loss_count = cum_loss_count[hist_pos].astype(float)
-        win_sum = cum_win_sum[hist_pos]
-        loss_sum = cum_loss_sum[hist_pos]
+        metrics: dict[int, dict[str, np.ndarray]] = {}
+        for horizon in (immediate_horizon, delayed_horizon):
+            known_col = f"_known_idx_{horizon}"
+            return_col = f"_directional_return_{horizon}"
+            obs = group[group[return_col].notna() & group[known_col].notna()].copy()
+            empty = np.full(len(group), np.nan, dtype=float)
+            if obs.empty:
+                metrics[horizon] = {
+                    "count": np.zeros(len(group), dtype=float),
+                    "win_rate": empty.copy(),
+                    "payoff": empty.copy(),
+                    "mean_return": empty.copy(),
+                }
+                continue
 
-        win_rate = np.divide(win_count, count, out=np.full_like(count, np.nan, dtype=float), where=count > 0)
-        avg_win = np.divide(win_sum, win_count, out=np.full_like(count, np.nan, dtype=float), where=win_count > 0)
-        avg_loss = np.divide(loss_sum, loss_count, out=np.zeros_like(count, dtype=float), where=loss_count > 0)
-        payoff = np.divide(avg_win, avg_loss, out=np.full_like(count, np.inf, dtype=float), where=avg_loss > 0)
-        eligible = (
-            (trigger_idx >= warmup_days)
-            & (count > 0)
-            & (win_rate > win_threshold)
-            & (payoff > payoff_threshold)
+            obs = obs.sort_values(known_col)
+            known_idx = obs[known_col].to_numpy(dtype=float)
+            directional = obs[return_col].to_numpy(dtype=float)
+            wins = directional > 0
+            losses = directional < 0
+            cum_count = np.r_[0, np.arange(1, len(obs) + 1)]
+            cum_return_sum = np.r_[0.0, np.cumsum(directional)]
+            cum_win_count = np.r_[0, np.cumsum(wins)]
+            cum_loss_count = np.r_[0, np.cumsum(losses)]
+            cum_win_sum = np.r_[0.0, np.cumsum(np.where(wins, directional, 0.0))]
+            cum_loss_sum = np.r_[0.0, np.cumsum(np.where(losses, -directional, 0.0))]
+
+            hist_pos = np.searchsorted(known_idx, trigger_idx, side="left")
+            count = cum_count[hist_pos].astype(float)
+            return_sum = cum_return_sum[hist_pos]
+            win_count = cum_win_count[hist_pos].astype(float)
+            loss_count = cum_loss_count[hist_pos].astype(float)
+            win_sum = cum_win_sum[hist_pos]
+            loss_sum = cum_loss_sum[hist_pos]
+            win_rate = np.divide(win_count, count, out=empty.copy(), where=count > 0)
+            mean_return = np.divide(return_sum, count, out=empty.copy(), where=count > 0)
+            avg_win = np.divide(win_sum, win_count, out=empty.copy(), where=win_count > 0)
+            avg_loss = np.divide(loss_sum, loss_count, out=np.zeros_like(count), where=loss_count > 0)
+            payoff = np.divide(avg_win, avg_loss, out=np.full_like(count, np.inf), where=avg_loss > 0)
+            metrics[horizon] = {
+                "count": count,
+                "win_rate": win_rate,
+                "payoff": payoff,
+                "mean_return": mean_return,
+            }
+
+        immediate = metrics[immediate_horizon]
+        delayed = metrics[delayed_horizon]
+        warm = trigger_idx >= warmup_days
+        immediate_ok = (
+            warm
+            & (immediate["count"] > 0)
+            & (immediate["win_rate"] > win_threshold)
+            & (immediate["payoff"] > payoff_threshold)
+            & (immediate["mean_return"] > edge_threshold)
         )
-        pass_mask[group.index.to_numpy()] = eligible
+        delayed_ok = (
+            warm
+            & ~immediate_ok
+            & (delayed["count"] > 0)
+            & (delayed["win_rate"] > win_threshold)
+            & (delayed["payoff"] > payoff_threshold)
+            & (delayed["mean_return"] > edge_threshold)
+            & ((delayed["mean_return"] - immediate["mean_return"]) > edge_threshold)
+        )
 
-    filtered = sig.loc[pass_mask, signals_df.columns.intersection(sig.columns).tolist()].copy()
+        is_open = group[SIGNAL_VALUE_COL].to_numpy(dtype=float) == 1
+        roles = np.full(len(group), "", dtype=object)
+        roles[immediate_ok & is_open] = "追涨"
+        roles[delayed_ok & is_open] = "抄底"
+        roles[immediate_ok & ~is_open] = "快速逃顶"
+        roles[delayed_ok & ~is_open] = "预先指示"
+        term_role[group_idx] = roles
+
+        selected_horizon[group_idx] = np.where(
+            immediate_ok,
+            immediate_horizon,
+            np.where(delayed_ok, delayed_horizon, np.nan),
+        )
+        selected_win_rate[group_idx] = np.where(
+            immediate_ok,
+            immediate["win_rate"],
+            np.where(delayed_ok, delayed["win_rate"], np.nan),
+        )
+        selected_payoff[group_idx] = np.where(
+            immediate_ok,
+            immediate["payoff"],
+            np.where(delayed_ok, delayed["payoff"], np.nan),
+        )
+        selected_mean_return[group_idx] = np.where(
+            immediate_ok,
+            immediate["mean_return"],
+            np.where(delayed_ok, delayed["mean_return"], np.nan),
+        )
+
+    sig["term_role"] = term_role
+    sig["term_horizon"] = selected_horizon
+    sig["term_win_rate"] = selected_win_rate
+    sig["term_payoff"] = selected_payoff
+    sig["term_mean_directional_return"] = selected_mean_return
+    pass_mask = sig["term_role"].ne("").to_numpy()
+    output_cols = signals_df.columns.intersection(sig.columns).tolist() + [
+        "term_role",
+        "term_horizon",
+        "term_win_rate",
+        "term_payoff",
+        "term_mean_directional_return",
+    ]
+    filtered = sig.loc[pass_mask, output_cols].copy()
     meta["effective_signal_count"] = int(len(filtered))
     if not filtered.empty:
         meta["first_effective_date"] = str(pd.to_datetime(filtered[SIGNAL_DATE_COL]).min().date())
         meta["last_effective_date"] = str(pd.to_datetime(filtered[SIGNAL_DATE_COL]).max().date())
+        meta["role_counts"] = {str(k): int(v) for k, v in filtered["term_role"].value_counts().items()}
     return filtered, meta
 
 
@@ -1111,10 +1199,6 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
     if not input_df.empty and not signals_df.empty:
         effective_signals_df, effective_signal_meta = _filter_effective_signals_expanding(input_df, signals_df)
         recent_signal_chart_html = _make_recent_signal_chart_html(input_df, effective_signals_df, default_visible_days=756)
-        recent_signal_chart_html = recent_signal_chart_html.replace(
-            "全历史信号触发：默认显示最近3年",
-            "有效信号触发：1年后 expanding 筛选，默认显示最近3年",
-        )
     else:
         effective_signals_df = signals_df.iloc[0:0].copy()
 
@@ -1761,12 +1845,12 @@ def render_html(v: dict[str, Any]) -> str:
 
     recent_signal_card_html = f"""
     <div class="card">
-      <h2>有效信号数量 <span class="badge">近20日 {int(v['signal_info'].get('total_recent', 0))} 条开仓</span></h2>
+      <h2>有效信号数量 <span class="badge">近20日 {int(v['signal_info'].get('total_recent', 0))} 条多头</span></h2>
       <div class="plot-container">
         <div class="plotly-wrap">{v['recent_signal_chart_html']}</div>
       </div>
-      <p class="signal-explain">净开仓量 = 当日有效开仓信号数 - 当日有效平仓信号数，用来看当天<span class="red-note">新增</span>多空信号谁更强；近20日累计净开仓 = 最近20个交易日有效开仓合计 - 有效平仓合计，用来看<span class="red-note">一段时间</span>内多头信号是否持续占优。</p>
-      <p class="footnote">数量口径：以 signals.csv 为来源，只统计经过历史有效性筛选的信号。筛选方式为：满 1 年历史后，对每个 instrument + factor + pattern + signal 使用截至当日前、且未来5日收益已经兑现的 expanding 历史样本；开仓信号按未来5日上涨计算胜率，平仓/看空信号按未来5日下跌计算胜率；仅保留胜率 &gt; 50% 且盈亏比 &gt; 1 的信号。第一子图为净开仓量 5 日均线，净开仓量 = 有效开仓数量 - 有效平仓数量；第二子图为近 20 个交易日累计净开仓；第三子图中蓝色线为有效开仓数量 5 日均线，红色线为有效平仓数量 5 日均线。图中传入全历史交易日数据，打开时默认显示最近 3 年约 756 个交易日；未触发有效信号的交易日数量记为 0。</p>
+      <p class="signal-explain">净多头信号 = 当日有效多头信号数 - 当日有效空头信号数，用来看当天<span class="red-note">新增</span>方向谁更强；近20日累计净多头 = 最近20个交易日有效多头合计 - 有效空头合计，用来看<span class="red-note">一段时间</span>内多头信号是否持续占优。</p>
+      <p class="footnote">数量口径：以 signals 为来源，满 1 年历史后，按 instrument + factor + pattern + signal 使用截至当日前、且对应未来收益已经兑现的 expanding 历史样本。5日上涨/下跌胜率大于50%、盈亏比大于1且平均方向收益大于1%的信号，分别归为追涨/快速逃顶；5日未达到即时标准，但20日满足相同有效性标准，且20日平均方向收益比5日高1个百分点以上的信号，分别归为抄底/预先指示。5日即时分类优先，四类互斥；不满足条件的信号不计入有效数量。六个子图依次展示净多头信号5日均线、近20日累计净多头、抄底、追涨、快速逃顶和预先指示；四类角色各自使用独立子图和独立数量轴。所有子图共享时间定位虚线和悬浮信息，并叠加收盘价右轴。图中传入全历史交易日数据，打开时默认显示最近3年约756个交易日；未触发有效信号的交易日数量记为0。</p>
     </div>
 """
 
@@ -1991,14 +2075,14 @@ tr:hover{{background:#f8f9fa}}
         <span class="overview-badge event-badge">有效信号</span>
       </div>
       <div class="overview-metrics">
-        <div class="overview-metric"><b>{event_recent_open}</b><span>近20日开仓</span></div>
-        <div class="overview-metric"><b>{event_recent_close}</b><span>近20日平仓</span></div>
-        <div class="overview-metric"><b>{event_recent_net}</b><span>净开仓</span></div>
+        <div class="overview-metric"><b>{event_recent_open}</b><span>近20日多头</span></div>
+        <div class="overview-metric"><b>{event_recent_close}</b><span>近20日空头</span></div>
+        <div class="overview-metric"><b>{event_recent_net}</b><span>净多头</span></div>
       </div>
       <div class="overview-note">
-        <span class="keyword-pill pill-core">1年后 expanding 筛选</span>
+        <span class="keyword-pill pill-core">5日即时 / 20日延迟</span>
         <span class="keyword-pill pill-bullish">胜率 &gt; 50%</span>
-        <span class="keyword-pill pill-bearish">盈亏比 &gt; 1</span>
+        <span class="keyword-pill pill-bearish">盈亏比 &gt; 1，方向收益 &gt; 1%</span>
       </div>
     </div>
     <div class="overview-card score-card">
@@ -2058,7 +2142,7 @@ tr:hover{{background:#f8f9fa}}
 
   <div id="event-module-panel" class="module-panel active event-module">
     <h2 class="module-heading">事件驱动模块</h2>
-    <p class="module-intro">事件驱动模块只展示经过历史有效性筛选后的信号数量。筛选使用 1 年后 expanding 历史样本，开仓信号按未来5日上涨检验，平仓/看空信号按未来5日下跌检验，仅保留胜率大于50%且盈亏比大于1的信号。</p>
+    <p class="module-intro">事件驱动模块只展示经过历史有效性筛选后的信号数量。筛选使用满1年后的 expanding 历史样本，并根据5日与20日收益期限结构，把多头信号拆为追涨和抄底，把空头信号拆为快速逃顶和预先指示；所有统计只使用当时已经兑现的未来收益。</p>
     {recent_signal_card_html}
 
   </div>
