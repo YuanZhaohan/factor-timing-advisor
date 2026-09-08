@@ -38,6 +38,53 @@ class SelectedRuleSpec:
     notes: str = ""
 
 
+# V1 remains available for an explicit rollback. Rebuild selected/composite
+# histories after switching; do not merge different rule versions incrementally.
+INSTITUTIONAL_NET_BUY_RULE_VERSION = "v2"
+INSTITUTIONAL_NET_BUY_RULES: dict[str, SelectedRuleSpec] = {
+    "v1": SelectedRuleSpec(
+        rule_id="institutional_net_buy",
+        factor="机构主动净买入",
+        category="胜率/资金",
+        strategy_label="机构主动净买入_季线低位修复_月线强势退潮退出",
+        base_open_condition="开仓_低位均值回复_20日",
+        open_condition_label="机构主动净买入_季线<=-0.5 + 季线5日斜率刚转正 + 信号日不大跌",
+        close_condition="闭仓_下穿_1.5sigma",
+        open_transform="institutional_net_buy_low_season_turn",
+        open_transform_params={
+            "season_factor": "机构主动净买入_季线",
+            "season_max": -0.5,
+            "slope_days": 5,
+            "min_daily_return": -0.005,
+        },
+        notes="季线低位后等待5日斜率转正，并要求信号日不大跌；月线下穿1.5sigma退出。",
+    ),
+    "v2": SelectedRuleSpec(
+        rule_id="institutional_net_buy",
+        factor="机构主动净买入",
+        category="胜率/资金",
+        strategy_label="机构主动净买入_V2_低位修复或趋势共振_双弱两日退出",
+        base_open_condition="开仓_低位均值回复_20日",
+        open_condition_label="季线低位5日变化刚转正且日涨跌幅>-0.5%，或后5日确认；或月季资金与价格趋势共振后0-5日收涨确认",
+        close_condition="闭仓_下穿_1.5sigma",
+        close_condition_label="月线下穿1.5sigma；共振入口另加月线5日变化<=0且价格<MA20连续两日退出",
+        open_transform="institutional_net_buy_v2",
+        open_transform_params={
+            "season_factor": "机构主动净买入_季线",
+            "month_factor": "机构主动净买入",
+            "season_max": -0.5,
+            "slope_days": 5,
+            "min_daily_return": -0.005,
+            "wait_days": 5,
+            "price_ma_days": 20,
+            "weak_confirm_days": 2,
+            "exit_threshold": 1.5,
+        },
+        notes="V2：原低位入口OR季线等待OR不限低位共振；双弱退出仅作用于共振来源仓位，无冷却。V1保留于版本开关，升级与回退见references/institutional_net_buy_v2_upgrade.md。",
+    ),
+}
+
+
 SELECTED_RULES: tuple[SelectedRuleSpec, ...] = (
     SelectedRuleSpec(
         rule_id="chip_profit_index",
@@ -165,23 +212,7 @@ SELECTED_RULES: tuple[SelectedRuleSpec, ...] = (
         open_transform="wait_price_up_5d",
         notes="资金低位修复后等价格收涨，资金转弱退出。",
     ),
-    SelectedRuleSpec(
-        rule_id="institutional_net_buy",
-        factor="机构主动净买入",
-        category="胜率/资金",
-        strategy_label="机构主动净买入_季线低位修复_月线强势退潮退出",
-        base_open_condition="开仓_低位均值回复_20日",
-        open_condition_label="机构主动净买入_季线<=-0.5 + 季线5日斜率刚转正 + 信号日不大跌",
-        close_condition="闭仓_下穿_1.5sigma",
-        open_transform="institutional_net_buy_low_season_turn",
-        open_transform_params={
-            "season_factor": "机构主动净买入_季线",
-            "season_max": -0.5,
-            "slope_days": 5,
-            "min_daily_return": -0.005,
-        },
-        notes="季线低位后等待5日斜率转正，并要求信号日不大跌；月线下穿1.5sigma退出。",
-    ),
+    INSTITUTIONAL_NET_BUY_RULES[INSTITUTIONAL_NET_BUY_RULE_VERSION],
     SelectedRuleSpec(
         rule_id="margin_trading_ratio",
         factor="融资成交占比_季线",
@@ -384,6 +415,154 @@ def _institutional_net_buy_low_season_turn_open(group: pd.DataFrame, params: dic
     slope = season.diff(slope_days)
     event = season.le(season_max) & slope.gt(0) & slope.shift(1).le(0) & price.pct_change().gt(min_daily_return)
     return event.fillna(False).to_numpy(dtype=bool)
+
+
+def _institutional_net_buy_v2_context(group: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    season = pd.to_numeric(group[str(params["season_factor"])], errors="coerce")
+    month = pd.to_numeric(group[str(params["month_factor"])], errors="coerce")
+    price = pd.to_numeric(group[PRICE_COL], errors="coerce")
+    days = int(params["slope_days"])
+    season_delta, month_delta = season.diff(days), month.diff(days)
+    ret1 = price.pct_change(fill_method=None)
+    ma = price.rolling(int(params["price_ma_days"])).mean()
+    setup = season.le(float(params["season_max"])) & season_delta.gt(0) & season_delta.shift(1).le(0)
+    not_big_drop = ret1.gt(float(params["min_daily_return"]))
+    trend = season_delta.gt(0) & month_delta.gt(0) & price.pct_change(days, fill_method=None).gt(0) & price.gt(ma)
+    threshold = float(params["exit_threshold"])
+    return pd.DataFrame({
+        "primary": setup & not_big_drop,
+        "season_setup": setup,
+        "season_valid": season_delta.gt(0),
+        "not_big_drop": not_big_drop,
+        "trend_setup": trend & ~trend.shift(1, fill_value=False),
+        "trend_valid": trend,
+        "price_up": ret1.gt(0),
+        "original_close": month.shift(1).ge(threshold) & month.lt(threshold),
+        "weak": month_delta.le(0) & price.lt(ma),
+        "always": True,
+    }).fillna(False).reset_index(drop=True)
+
+
+def _institutional_net_buy_v2_schedule(context: pd.DataFrame, params: dict[str, Any]) -> dict[str, np.ndarray]:
+    """One causal account clock for both historical trades and latest status."""
+    wait_days, confirm_days = int(params["wait_days"]), int(params["weak_confirm_days"])
+    if wait_days < 1 or confirm_days < 1:
+        raise ValueError("Institutional waiting and confirmation windows must be positive")
+    branch_specs = {
+        "primary": ("primary", "always", "always", 0, 0),
+        "wait": ("season_setup", "not_big_drop", "season_valid", 1, wait_days),
+        "trend": ("trend_setup", "price_up", "trend_valid", 0, wait_days),
+    }
+    branches = {key: tuple(context[c].to_numpy(dtype=bool) for c in cols[:3]) + cols[3:]
+                for key, cols in branch_specs.items()}
+    n = len(context)
+    opens, closes = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    sources, reasons = np.full(n, "", dtype=object), np.full(n, "", dtype=object)
+    origins = np.full(n, -1, dtype=int)
+    post_close, streaks = np.zeros(n), np.zeros(n, dtype=int)
+    old_close, weak = context.original_close.to_numpy(dtype=bool), context.weak.to_numpy(dtype=bool)
+    pending = dict.fromkeys(branches)
+    holding, held_source, streak = False, "", 0
+    entry_due = exit_due = -1
+    for i in range(n):
+        if exit_due == i:
+            holding, held_source, streak, exit_due = False, "", 0, -1
+            pending = dict.fromkeys(branches)
+        if entry_due == i:
+            holding, held_source, streak, entry_due = True, sources[i - 1], 0, -1
+        post_close[i] = float(holding)
+        if holding:
+            if held_source == "trend":
+                streak = streak + 1 if weak[i] else 0
+            streaks[i] = streak
+            if old_close[i] or (held_source == "trend" and streak >= confirm_days):
+                closes[i] = True
+                reasons[i] = "month_cross_down_1.5" if old_close[i] else "failed_recovery_2d"
+                exit_due = i + 1
+            continue
+        ready = []
+        for key, (seed, confirm, valid, lower, upper) in branches.items():
+            origin = pending[key]
+            if origin is not None and (i - origin > upper or not valid[i]):
+                origin = None
+            if origin is None and seed[i] and valid[i]:
+                origin = i
+            pending[key] = origin
+            if origin is not None and lower <= i - origin <= upper and confirm[i]:
+                ready.append((key, origin))
+        if ready:
+            sources[i], origins[i] = ready[0]
+            opens[i] = True
+            pending = dict.fromkeys(branches)
+            entry_due = i + 1
+    return {"opens": opens, "closes": closes, "sources": sources, "origins": origins,
+            "reasons": reasons, "post_close_position": post_close, "weak_streak": streaks}
+
+
+def _simulate_institutional_net_buy_v2(
+    spec: SelectedRuleSpec, item: dict[str, Any],
+) -> tuple[list[dict[str, Any]], np.ndarray, dict[str, Any], np.ndarray, np.ndarray]:
+    group = item["group"].reset_index(drop=True)
+    prices, dates = np.asarray(item["prices"], dtype=float), np.asarray(item["dates"])
+    n = len(group)
+    if not n or not np.isfinite(prices).all() or (prices <= 0).any():
+        raise ValueError("Institutional V2 requires nonempty finite positive daily prices")
+    state = _institutional_net_buy_v2_schedule(_institutional_net_buy_v2_context(group, spec.open_transform_params), spec.open_transform_params)
+    opens, closes = state["opens"], state["closes"]
+    post_close = state["post_close_position"]
+    position = np.r_[0., post_close[:-1]]
+    records = []
+    exit_signals = np.flatnonzero(closes)
+    code, name = str(item[CODE_COL]), group[NAME_COL].iloc[-1] if NAME_COL in group else ""
+    for signal in np.flatnonzero(opens[:-1]):
+        entry = int(signal + 1)
+        k = np.searchsorted(exit_signals, entry)
+        exit_signal = int(exit_signals[k]) if k < len(exit_signals) else None
+        closed = exit_signal is not None and exit_signal + 1 < n
+        end = exit_signal + 1 if closed else n - 1
+        origin = int(state["origins"][signal])
+        reason = state["reasons"][exit_signal] if closed else "unclosed"
+        trade_return = prices[end] / prices[entry] - 1
+        records.append({
+            CODE_COL: code, NAME_COL: name, "rule_id": spec.rule_id, "rule_version": "v2",
+            "factor": spec.factor, "category": spec.category, "strategy_label": spec.strategy_label,
+            "open_condition": _open_label(spec), "close_condition": _close_label(spec),
+            "close_reason": ("闭仓_下穿_1.5sigma" if reason == "month_cross_down_1.5" else "双弱连续两日退出") if closed else "end",
+            "entry_signal_date": dates[signal], "entry_date": dates[entry],
+            "exit_signal_date": dates[exit_signal] if exit_signal is not None else pd.NaT,
+            # Legacy exit_date is the chart/valuation endpoint when forced_exit=True.
+            "exit_date": dates[end], "exit_execution_date": dates[end] if closed else pd.NaT,
+            "mark_date": dates[end], "entry_signal_idx": int(signal), "entry_idx": entry,
+            "exit_signal_idx": exit_signal, "exit_idx": end,
+            "entry_price": prices[entry], "exit_price": prices[end],
+            "trade_return": trade_return,
+            "annualized_trade_return": _calc_annualized_trade_return(trade_return, end - entry),
+            "max_drawdown": _calc_trade_max_drawdown(prices, entry, end), "holding_days": end - entry,
+            "forced_exit": not closed, "trade_status": "closed" if closed else "open",
+            "entry_source": state["sources"][signal], "origin_date": dates[origin],
+            "wait_lag_days": int(signal - origin), "exit_reason": reason,
+        })
+    holding = bool(post_close[-1])
+    active = records[-1] if holding else None
+    open_idx, close_idx = np.flatnonzero(opens), np.flatnonzero(closes)
+    pending = "待闭仓" if closes[-1] else "待开仓" if opens[-1] else ""
+    status = {
+        CODE_COL: code, NAME_COL: name, "rule_version": "v2", "current_state": "多" if holding else "空",
+        "pending_signal": pending, "pending_signal_date": dates[-1] if pending else pd.NaT,
+        "entry_signal_date": active["entry_signal_date"] if active else pd.NaT,
+        "entry_date": active["entry_date"] if active else pd.NaT,
+        "current_holding_days": active["holding_days"] if active else np.nan,
+        "current_return": active["trade_return"] if active else np.nan,
+        "entry_source": active["entry_source"] if active else "",
+        "last_open_signal_date": dates[open_idx[-1]] if len(open_idx) else pd.NaT,
+        "last_close_signal_date": dates[close_idx[-1]] if len(close_idx) else pd.NaT,
+        "latest_date": dates[-1], "latest_price": prices[-1],
+        "latest_factor_value": pd.to_numeric(group[spec.factor], errors="coerce").iloc[-1],
+        "latest_open_signal": bool(opens[-1]), "latest_close_signal": bool(closes[-1]),
+        "open_event_count": int(opens.sum()), "close_event_count": int(closes.sum()),
+        "weak_streak": int(state["weak_streak"][-1]),
+    }
+    return records, position, status, opens, closes
 
 
 def _five_day_price_factor_sync_down(group: pd.DataFrame, factor: str) -> np.ndarray:
@@ -790,19 +969,25 @@ def run_selected_single_factor_rules(
         if spec.open_transform == "chip_profit_center":
             _factor_cache(data, signals, conditions, "筹码盈利中枢_季线", cache_by_factor)
 
-        base_open_events = _events_by_code(cache, spec.base_open_condition)
-        base_close_events = _events_by_code(cache, spec.close_condition)
-        open_events_by_code = _selected_open_events(spec, cache, base_open_events, cache_by_factor, data_by_code)
-        close_events_by_code = _selected_close_events(spec, cache, base_close_events)
+        stateful = {}
+        if spec.open_transform == "institutional_net_buy_v2":
+            stateful = {str(item[CODE_COL]): _simulate_institutional_net_buy_v2(spec, item) for item in cache}
+            open_events_by_code = {code: result[3] for code, result in stateful.items()}
+            close_events_by_code = {code: result[4] for code, result in stateful.items()}
+        else:
+            base_open_events = _events_by_code(cache, spec.base_open_condition)
+            base_close_events = _events_by_code(cache, spec.close_condition)
+            open_events_by_code = _selected_open_events(spec, cache, base_open_events, cache_by_factor, data_by_code)
+            close_events_by_code = _selected_close_events(spec, cache, base_close_events)
 
         for item in cache:
             code = str(item[CODE_COL])
-            records, position, status = _simulate_one_group(
-                spec,
-                item,
-                open_events_by_code[code],
-                close_events_by_code[code],
-            )
+            if code in stateful:
+                records, position, status = stateful[code][:3]
+            else:
+                records, position, status = _simulate_one_group(
+                    spec, item, open_events_by_code[code], close_events_by_code[code],
+                )
             summary_rows.append(_summarize_rule(spec, item, records, position, open_events_by_code[code]))
             trade_rows.extend(records)
             status.update(

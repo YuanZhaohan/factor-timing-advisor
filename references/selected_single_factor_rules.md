@@ -2,7 +2,11 @@
 
 ## 定位
 
-`selected_single_factor_rules.py` 汇总当前已经确认的单因子最优持仓规则，只保留正式规则，不保留中间探索版本。
+`selected_single_factor_rules.py` 汇总当前已经确认的单因子持仓规则，只执行当前正式版本；旧正式版本可作为明确的回退入口保留，不运行中间探索版本。
+
+机构主动净买入于2026-09-08切换为V2：原低位入口OR季线等待OR不限低位趋势共振；仅共振来源的持仓新增双弱连续两日退出，原月线下穿1.5sigma退出保留。其余14条规则不变。
+
+开平仓量化条件、V1旧规则备注、备份位置、验证结果与回退步骤见 [机构主动净买入V2升级说明](institutional_net_buy_v2_upgrade.md)。注意：规则代码切换不等于历史报告已迁移，升级当次的结果发布状态也记录在那里。
 
 这个模块用于日度增量更新：
 
@@ -35,6 +39,7 @@ references/composite_timing_strategies.md
 - `score-update` 日更链路默认不再刷新 rule pair；rule pair 研究代码保留，但不作为日常增量报告的必跑步骤。
 - 如果需要临时刷新 best rule-pair 输出，可以显式增加 `--refresh-rule-pair`。
 - 单因子模块以后以人工确认后的最优规则为准，更新 `selected_single_factor_rules.py` 后由日更链路刷新最新状态。
+- 修改正式规则会改变历史仓位，须先完成受控的单因子/复合结果版本迁移，再恢复普通 `update`；不能为通过更新而关闭历史前缀校验。
 
 ## 输出
 

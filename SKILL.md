@@ -35,6 +35,8 @@ workspace/runs/default/
 
 每天只需要替换输入 CSV，然后运行一次 `update`。
 
+规则版本升级不属于普通追加更新。机构主动净买入V2的开平仓条件、V1回退入口及升级当次的数据日期差异，见 [升级说明](references/institutional_net_buy_v2_upgrade.md)。修改规则后先完成相关单因子/复合结果的受控迁移，不关闭历史前缀校验，不因此重跑全部rule pair。
+
 ### 0. 更新输入数据
 
 把最新宽基数据放到：
