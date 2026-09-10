@@ -1011,23 +1011,26 @@ def run_selected_single_factor_rules(
     trades = pd.DataFrame(trade_rows)
     positions = pd.concat(position_tables, ignore_index=True) if position_tables else pd.DataFrame()
     specs = _rule_specs_frame()
-
-    _write_outputs(
-        output_path,
-        {
+    tables = {
             "selected_rule_specs": specs,
             "selected_rule_latest_status": status,
             "selected_rule_summary": summary,
             "selected_rule_trades": trades,
             "selected_rule_daily_positions": positions,
-        },
-    )
+        }
+    from auxiliary_signal_rules import build_auxiliary_tables, OUTPUT_SUBDIR as AUXILIARY_SUBDIR
+    auxiliary_selected, auxiliary = build_auxiliary_tables(data, run_dir)
+    for name, extra in auxiliary_selected.items():
+        tables[name] = pd.concat([tables[name], extra.reindex(columns=tables[name].columns)], ignore_index=True)
+    if auxiliary:
+        _write_outputs(out_root / "results" / AUXILIARY_SUBDIR, auxiliary)
+    _write_outputs(output_path, tables)
     return {
-        "selected_rule_count": len(specs),
-        "selected_rule_status_rows": len(status),
-        "selected_rule_summary_rows": len(summary),
-        "selected_rule_trade_rows": len(trades),
-        "selected_rule_position_rows": len(positions),
+        "selected_rule_count": len(tables["selected_rule_specs"]),
+        "selected_rule_status_rows": len(tables["selected_rule_latest_status"]),
+        "selected_rule_summary_rows": len(tables["selected_rule_summary"]),
+        "selected_rule_trade_rows": len(tables["selected_rule_trades"]),
+        "selected_rule_position_rows": len(tables["selected_rule_daily_positions"]),
     }
 
 

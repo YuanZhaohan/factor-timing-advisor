@@ -16,8 +16,9 @@ import numpy as np
 import pandas as pd
 
 from data_cleaning import load_data
+from auxiliary_signal_rules import FACTOR_COLUMNS, NON_CORE_INPUT_COLUMNS, INPUT_PATH as AUXILIARY_INPUT_PATH, extract_auxiliary_input, validate_alignment
 from io_utils import read_run_table, resolve_table_file, write_table
-from timing_config import CODE_COL, DATE_COL, NAME_COL
+from timing_config import CODE_COL, DATE_COL, NAME_COL, PRICE_COL
 
 
 class SafeUpdateError(RuntimeError):
@@ -67,7 +68,15 @@ CRITICAL_TABLES: tuple[dict[str, Any], ...] = (
         ],
         "date_col": DATE_COL,
     },
+    {"name": "auxiliary_input", "candidates": [AUXILIARY_INPUT_PATH], "date_col": DATE_COL, "optional": True},
+    {"name": "auxiliary_rule_daily", "candidates": ["results/auxiliary_signal_rules/auxiliary_rule_daily.parquet"], "date_col": DATE_COL, "optional": True},
+    {"name": "auxiliary_composite_daily", "candidates": ["results/auxiliary_composite_strategies/auxiliary_composite_daily.parquet"], "date_col": DATE_COL, "optional": True},
 )
+
+
+def _critical_tables(run_dir: Path):
+    enabled = (run_dir / AUXILIARY_INPUT_PATH).exists()
+    return [spec for spec in CRITICAL_TABLES if not spec.get("optional") or enabled]
 
 
 def _utc_now() -> str:
@@ -305,7 +314,7 @@ def _assert_historical_prefix_unchanged(
     cutoff: pd.Timestamp,
 ) -> dict[str, Any]:
     checks: dict[str, Any] = {}
-    for spec in CRITICAL_TABLES:
+    for spec in _critical_tables(production_dir):
         old = _historical_prefix(_table(production_dir, spec), spec["date_col"], cutoff)
         new = _historical_prefix(_table(staging_dir, spec), spec["date_col"], cutoff)
         try:
@@ -330,7 +339,7 @@ def _assert_historical_prefix_unchanged(
 
 def _verify_latest_dates(staging_dir: Path, expected_latest: pd.Timestamp) -> dict[str, str]:
     latest_dates: dict[str, str] = {}
-    for spec in CRITICAL_TABLES:
+    for spec in _critical_tables(staging_dir):
         frame = _table(staging_dir, spec)
         if spec["date_col"] not in frame.columns:
             raise SafeUpdateError(f"关键表缺少日期列：{spec['name']} / {spec['date_col']}")
@@ -353,7 +362,7 @@ def _verify_latest_dates(staging_dir: Path, expected_latest: pd.Timestamp) -> di
 
 def _output_fingerprints(run_dir: Path) -> dict[str, dict[str, Any]]:
     fingerprints: dict[str, dict[str, Any]] = {}
-    for spec in CRITICAL_TABLES:
+    for spec in _critical_tables(run_dir):
         path = resolve_table_file(run_dir, spec["candidates"])
         fingerprints[spec["name"]] = {
             "path": str(path.relative_to(run_dir)),
@@ -378,8 +387,11 @@ def _code_fingerprints(skill_root: Path) -> dict[str, str]:
         skill_root / "runtime" / "signal_generation.py",
         skill_root / "runtime" / "role_strategy.py",
         skill_root / "runtime" / "selected_single_factor_rules.py",
+        skill_root / "runtime" / "auxiliary_signal_rules.py",
+        skill_root / "runtime" / "auxiliary_composite_strategies.py",
         skill_root / "runtime" / "composite_timing_strategies.py",
         skill_root / "runtime" / "generate_timing_report.py",
+        skill_root / "runtime" / "interactive_report.py",
     ]
     return {str(path.relative_to(skill_root)): _sha256(path) for path in paths if path.exists()}
 
@@ -444,7 +456,10 @@ def run_safe_one_click_update(
         _safe_child(runs_root, staging_dir)
         _safe_child(runs_root, failed_dir)
         try:
-            raw = load_data(csv_path)
+            raw_all = load_data(csv_path)
+            raw_auxiliary = extract_auxiliary_input(raw_all)
+            raw = raw_all.drop(columns=list(NON_CORE_INPUT_COLUMNS), errors="ignore")
+            audit["excluded_core_columns"] = [c for c in NON_CORE_INPUT_COLUMNS if c in raw_all]
             snapshot_candidates = [run_dir / "data" / "input_snapshot.parquet", run_dir / "data" / "input_snapshot.csv"]
             snapshot_exists = run_dir.exists() and any(path.exists() for path in snapshot_candidates)
             if snapshot_exists:
@@ -467,6 +482,25 @@ def run_safe_one_click_update(
                     "safe_latest_date": str(pd.Timestamp(raw[DATE_COL].max()).date()),
                     "safe_fingerprint": _frame_fingerprint(raw),
                 }
+
+            auxiliary_path = run_dir / AUXILIARY_INPUT_PATH
+            safe_auxiliary = None
+            if auxiliary_path.exists():
+                old_auxiliary = pd.read_parquet(auxiliary_path)
+                if raw_auxiliary is None:
+                    raise SafeUpdateError("已启用辅助策略，但原始CSV缺少轨道偏离度三列；拒绝静默沿用旧信号。")
+                safe_auxiliary, auxiliary_diff = build_append_only_input(raw_auxiliary, old_auxiliary, numeric_atol=numeric_atol)
+                audit["auxiliary_input_diff"] = auxiliary_diff
+            elif raw_auxiliary is not None:
+                if snapshot_exists:
+                    raise SafeUpdateError("首次接入辅助策略需要受控迁移：先建立辅助历史及两套对照，再恢复普通update。")
+                safe_auxiliary = raw_auxiliary
+            if safe_auxiliary is not None:
+                # Revisions to old benchmark prices must not leak into the new sleeve.
+                safe_auxiliary = safe_auxiliary.drop(columns=[PRICE_COL]).merge(
+                    safe_input[[CODE_COL, DATE_COL, PRICE_COL]], on=[CODE_COL, DATE_COL], validate="one_to_one")
+                safe_auxiliary = safe_auxiliary[[CODE_COL, DATE_COL, PRICE_COL, *FACTOR_COLUMNS]]
+                validate_alignment(safe_input, safe_auxiliary)
 
             audit["raw_file"] = {"size": csv_path.stat().st_size, "sha256": _sha256(csv_path)}
             if dry_run:
@@ -495,6 +529,8 @@ def run_safe_one_click_update(
                 staging_dir.mkdir(parents=True)
 
             safe_input_path = staging_dir / "data" / f"_append_only_input_{session}.parquet"
+            if safe_auxiliary is not None:
+                write_table(safe_auxiliary, staging_dir / AUXILIARY_INPUT_PATH)
             write_table(safe_input, safe_input_path)
             if snapshot_exists:
                 pipeline_stats = daily_runner(safe_input_path, staging_dir)

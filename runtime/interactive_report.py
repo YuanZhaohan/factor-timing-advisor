@@ -595,20 +595,23 @@ _VISIBLE_Y_AUTOSCALE_SCRIPT = r"""
   const layoutAxisKey = (traceAxis) => traceAxis === 'y' ? 'yaxis' : `yaxis${traceAxis.slice(1)}`;
 
   const rescaleVisibleY = () => {
-    const xAxisKeys = Object.keys(graph.layout).filter((key) => /^xaxis\d*$/.test(key));
-    const activeXAxis = xAxisKeys.map((key) => graph.layout[key]).find((axis) => axis && axis.range);
-    const range = activeXAxis && activeXAxis.range;
-    const start = range ? toMillis(range[0]) : -Infinity;
-    const end = range ? toMillis(range[1]) : Infinity;
     const bounds = {};
 
-    graph.data.forEach((trace) => {
+    // Plotly 6 may keep binary descriptors in graph.data; _fullData contains decoded arrays.
+    (graph._fullData || graph.data).forEach((trace) => {
       if (
-        trace.visible === 'legendonly' || !trace.x || !trace.y ||
+        trace.visible === false || trace.visible === 'legendonly' || !trace.x || !trace.y ||
         typeof trace.x.length !== 'number' || typeof trace.y.length !== 'number'
       ) return;
       const axisKey = layoutAxisKey(trace.yaxis || 'y');
+      const layout = graph._fullLayout || graph.layout;
+      if (layout[axisKey] && layout[axisKey].side === 'right') return;
+      const xAxisKey = (trace.xaxis || 'x').replace(/^x/, 'xaxis');
+      const range = layout[xAxisKey] && layout[xAxisKey].range;
+      const limits = range ? range.map(toMillis).sort((a, b) => a-b) : [-Infinity, Infinity];
+      const [start, end] = limits;
       for (let index = 0; index < trace.x.length; index += 1) {
+        if (trace.y[index] === null || trace.y[index] === undefined) continue;
         const xValue = toMillis(trace.x[index]);
         const yValue = Number(trace.y[index]);
         if (!Number.isFinite(xValue) || !Number.isFinite(yValue) || xValue < start || xValue > end) continue;
@@ -631,25 +634,36 @@ _VISIBLE_Y_AUTOSCALE_SCRIPT = r"""
   };
 
   let frameId = null;
+  const scheduleRescale = () => {
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = requestAnimationFrame(rescaleVisibleY);
+  };
   graph.on('plotly_relayout', (eventData) => {
     const xChanged = Object.keys(eventData || {}).some(
       (key) => /^xaxis\d*\.(range|autorange)/.test(key)
     );
     if (!xChanged) return;
-    if (frameId !== null) cancelAnimationFrame(frameId);
-    frameId = requestAnimationFrame(rescaleVisibleY);
+    scheduleRescale();
   });
-  requestAnimationFrame(rescaleVisibleY);
+  graph.on('plotly_restyle', scheduleRescale);
+  scheduleRescale();
 })();
 """
 
 
-def _fig_html(fig: go.Figure, height: int | None = None, auto_y_on_xrange: bool = False) -> str:
+def _fig_html(fig: go.Figure, height: int | None = None, auto_y_on_xrange: bool = False, separate_legend: bool = False) -> str:
     has_date_filter = _enable_date_filter(fig)
     if height is not None:
         if has_date_filter:
             height += 48
         fig.update_layout(height=height)
+    if separate_legend and has_date_filter:
+        plot_height = max(180, (fig.layout.height or 450) - fig.layout.margin.t - fig.layout.margin.b)
+        _, top_axis, _ = _date_filter_axis_keys(fig)
+        buttons = fig.layout[top_axis].rangeselector.buttons
+        fig.update_layout(legend=dict(y=1.02+48/plot_height, yanchor="bottom"))
+        fig.update_layout(**{top_axis: {"rangeselector": {"y": 1.01}}})
+        fig.layout[top_axis].rangeselector.buttons = [buttons[i].to_plotly_json() for i in (0, 4, 6)]
     return pio.to_html(
         fig,
         full_html=False,
@@ -1772,6 +1786,10 @@ def _make_rule_pair_html(
         prev = best_equity["position"].shift(1).fillna(0.0)
         open_dates = best_equity.loc[(prev <= 0) & (best_equity["position"] > 0), DATE_COL]
         close_dates = best_equity.loc[(prev > 0) & (best_equity["position"] <= 0), DATE_COL]
+        if best_row.attrs.get("_actual_trade_markers") and isinstance(trade_df, pd.DataFrame) and not trade_df.empty:
+            # Auxiliary position is return exposure; actual close fills are one day earlier.
+            open_dates = pd.to_datetime(trade_df["entry_date"]).rename(DATE_COL)
+            close_dates = pd.to_datetime(trade_df.loc[~trade_df["forced_exit"].astype(bool), "exit_date"]).rename(DATE_COL)
         open_trades = trade_source.reindex(pd.DatetimeIndex(open_dates)).reset_index().rename(columns={"index": DATE_COL})
         close_trades = trade_source.reindex(pd.DatetimeIndex(close_dates)).reset_index().rename(columns={"index": DATE_COL})
         if not open_trades.empty:
@@ -1955,16 +1973,20 @@ def _make_rule_pair_html(
     )
     fig_factor.update_xaxes(title_text="", row=row_count, col=1)
 
+    auxiliary_layout = bool(best_row.attrs.get("_actual_trade_markers"))
+    if auxiliary_layout:
+        # The same metrics already appear above the plot; avoid a long floating label on narrow screens.
+        fig_equity.layout.annotations = ()
     return (
         "<div class='rule-pair-figures'>"
         "<div class='plot-panel'><div class='plot-panel-title'>1. 价格与持仓区间</div>"
-        f"{_fig_html(fig_price, height=320)}"
+        f"{_fig_html(fig_price, height=320, separate_legend=auxiliary_layout)}"
         "</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>2. 策略净值与超额曲线</div>"
-        f"{_fig_html(fig_equity, height=320)}"
+        f"{_fig_html(fig_equity, height=320, separate_legend=auxiliary_layout)}"
         "</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>3. 因子值、收盘价与实际交易点</div>"
-        f"{_fig_html(fig_factor, height=factor_height)}"
+        f"{_fig_html(fig_factor, height=factor_height, separate_legend=auxiliary_layout)}"
         "</div>"
         "</div>"
     )

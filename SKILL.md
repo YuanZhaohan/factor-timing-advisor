@@ -37,6 +37,8 @@ workspace/runs/default/
 
 规则版本升级不属于普通追加更新。机构主动净买入V2的开平仓条件、V1回退入口及升级当次的数据日期差异，见 [升级说明](references/institutional_net_buy_v2_upgrade.md)。修改规则后先完成相关单因子/复合结果的受控迁移，不关闭历史前缀校验，不因此重跑全部rule pair。
 
+轨道偏离度作为第16条辅助单因子展示，两个原复合不变，另有独立的辅助增强观察版。输入隔离、两套规则、执行时钟和回退约定见[辅助接入说明](references/channel_auxiliary_upgrade.md)。已启用后CSV必须保留轨道偏离度原始/季线/年线三列，辅助快照也必须同步追加并通过历史校验。
+
 ### 0. 更新输入数据
 
 把最新宽基数据放到：
@@ -66,6 +68,8 @@ skills/factor-timing-advisor/workspace/data/宽基得分.csv
 日更会刷新：
 
 - `data/input_snapshot.parquet`
+- `data/auxiliary_input_snapshot.parquet`（启用辅助时）
+- `results/auxiliary_signal_rules/`和`results/auxiliary_composite_strategies/`（独立观察输出，不替代原复合）
 - `results/signals/signals.parquet`
 - `results/events/event_forward_returns.parquet`
 - `results/score/monthly_refresh_daily_score.parquet`
@@ -109,7 +113,7 @@ skills/factor-timing-advisor/workspace/runs/default/results/report/timing_report
 - 事件驱动模块：信号分布、看多/看空结构、净开仓量时序。
 - 综合打分模块：抄底得分、逃顶得分、score 策略净值。
 - 单因子规则模块：正式保留规则的当前状态、最优开仓/平仓规则与交互图。
-- 复合策略模块：用两个同级策略标签分别展示策略逻辑、当前仓位、历史开平仓点、策略/基准净值、超额净值和绩效指标。
+- 复合策略模块：两个原策略标签保持不变，展示逻辑、仓位、开平仓、净值和绩效；另在模块内增加“辅助增强对照（观察版）”，标记辅助补仓与无交易接管。
 
 正常日更耗时目标：约 3 到 5 分钟内。
 

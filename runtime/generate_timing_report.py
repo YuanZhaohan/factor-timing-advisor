@@ -815,6 +815,9 @@ def _prepare_composite_trades(trades_df: pd.DataFrame, strategy_id: str) -> pd.D
             {
                 "weekly_anchor": "周频锚",
                 "intraweek_strong_event": "周中强事件",
+                "auxiliary_entry": "辅助新信号补仓",
+                "auxiliary_exit": "辅助信号退出",
+                "core_transition": "原组合调仓",
             }
         )
     else:
@@ -865,19 +868,36 @@ def _make_composite_strategy_charts(
             hovertemplate=f"%{{x|%Y-%m-%d}}<br>{price_label}=%{{y:.4f}}<extra></extra>",
         )
     )
-    for start, end in _composite_long_spans(daily):
-        fig_signal.add_vrect(
-            x0=start,
-            x1=end,
-            fillcolor="rgba(239,68,68,0.10)",
-            line_width=0,
-            layer="below",
-        )
+    if "auxiliary_exposure" in daily:
+        for column, color, label in [
+            ("core_exposure", "rgba(239,68,68,0.10)", "原组合持仓"),
+            ("auxiliary_exposure", "rgba(59,130,246,0.22)", "辅助补仓区间"),
+        ]:
+            active = daily[column].gt(0.5).to_numpy()
+            starts = np.flatnonzero(active & np.r_[True, ~active[:-1]])
+            ends = np.flatnonzero(active & np.r_[~active[1:], True])
+            for number, (start, end) in enumerate(zip(starts, ends)):
+                # Half-open intervals keep one-day holdings visible and avoid overlapping ownership colors.
+                right = daily[DATE_COL].iloc[end+1] if end+1 < len(daily) else daily[DATE_COL].iloc[end] + pd.Timedelta(days=1)
+                fig_signal.add_vrect(x0=daily[DATE_COL].iloc[start], x1=right, fillcolor=color,
+                                     line_width=0, layer="below", name=label,
+                                     legendgroup=column, showlegend=number == 0)
+    else:
+        for start, end in _composite_long_spans(daily):
+            fig_signal.add_vrect(
+                x0=start,
+                x1=end,
+                fillcolor="rgba(239,68,68,0.10)",
+                line_width=0,
+                layer="below",
+            )
     if not trades.empty and "execution_date" in trades.columns:
         marker_values = daily[[DATE_COL, price_column]].rename(
             columns={DATE_COL: "execution_date", price_column: "marker_value"}
         )
         marked = trades.merge(marker_values, on="execution_date", how="left", validate="many_to_one")
+        if "auxiliary_exposure" in daily:
+            marked = marked.loc[~marked["trigger_source"].isin(["auxiliary_entry", "auxiliary_exit"])]
         for side, name, symbol, color in [
             ("entry", "开仓点", "triangle-up", "#169B62"),
             ("exit", "平仓点", "triangle-down", "#D62728"),
@@ -941,6 +961,12 @@ def _make_composite_strategy_charts(
         ),
         secondary_y=True,
     )
+    if "auxiliary_exposure" in daily:
+        fig_score.add_trace(go.Scatter(
+            x=daily[DATE_COL], y=daily["auxiliary_exposure"], name="辅助补仓",
+            mode="lines", line=dict(color="#3B82F6", width=2, shape="hv"),
+            hovertemplate="%{x|%Y-%m-%d}<br>辅助补仓=%{y:.0%}<extra></extra>",
+        ), secondary_y=True)
     fig_score.add_hline(y=0.0, line_width=0.9, line_dash="dot", line_color="#667085", secondary_y=False)
     if strong_threshold is not None:
         for threshold in [strong_threshold, -strong_threshold]:
@@ -976,6 +1002,12 @@ def _make_composite_strategy_charts(
             hovertemplate="%{x|%Y-%m-%d}<br>基准净值=%{y:.4f}<extra></extra>",
         )
     )
+    if "base_net_equity" in daily:
+        fig_equity.add_trace(go.Scatter(
+            x=daily[DATE_COL], y=daily["base_net_equity"], name="原组合净值",
+            mode="lines", line=dict(color="#B7791F", width=1.6, dash="dash"),
+        ))
+        fig_excess_base = daily["base_net_equity"].div(daily["benchmark_equity"])
     fig_equity.add_hline(y=1.0, line_width=0.9, line_dash="dot", line_color="#777777")
     fig_equity.update_layout(**layout_common, height=350)
     fig_equity.update_yaxes(title_text="累计净值")
@@ -993,6 +1025,9 @@ def _make_composite_strategy_charts(
             hovertemplate="%{x|%Y-%m-%d}<br>超额净值=%{y:.4f}<extra></extra>",
         )
     )
+    if "base_net_equity" in daily:
+        fig_excess.add_trace(go.Scatter(x=daily[DATE_COL], y=fig_excess_base, name="原组合超额净值",
+                                       mode="lines", line=dict(color="#B7791F", width=1.6, dash="dash")))
     fig_excess.add_hline(y=1.0, line_width=0.9, line_dash="dot", line_color="#777777")
     fig_excess.update_layout(**layout_common, height=320)
     fig_excess.update_yaxes(title_text="策略 / 基准")
@@ -1000,13 +1035,13 @@ def _make_composite_strategy_charts(
     return (
         "<div class='composite-chart-stack'>"
         "<div class='plot-panel'><div class='plot-panel-title'>1. 价格、持仓区间与开平仓信号</div>"
-        f"{_fig_html(fig_signal, height=360)}</div>"
+        f"{_fig_html(fig_signal, height=360, separate_legend='auxiliary_exposure' in daily)}</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>2. 复合分数、周频锚与仓位</div>"
-        f"{_fig_html(fig_score, height=360)}</div>"
+        f"{_fig_html(fig_score, height=360, separate_legend='auxiliary_exposure' in daily)}</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>3. 历史策略净值与基准净值</div>"
-        f"{_fig_html(fig_equity, height=350)}</div>"
+        f"{_fig_html(fig_equity, height=350, separate_legend='auxiliary_exposure' in daily)}</div>"
         "<div class='plot-panel'><div class='plot-panel-title'>4. 历史超额净值曲线</div>"
-        f"{_fig_html(fig_excess, height=320)}</div>"
+        f"{_fig_html(fig_excess, height=320, separate_legend='auxiliary_exposure' in daily)}</div>"
         "</div>"
     )
 
@@ -1056,6 +1091,45 @@ def _build_composite_strategy_views(
     return views
 
 
+def _build_auxiliary_comparison_html(input_dir: Path, input_df: pd.DataFrame) -> str:
+    from auxiliary_composite_strategies import OUTPUT_SUBDIR, SUFFIX
+
+    def read(name):
+        return _read_csv(input_dir, [f"results/{OUTPUT_SUBDIR}/{name}.csv"], optional=True)
+
+    daily_df = read("auxiliary_composite_daily")
+    if daily_df.empty:
+        return ""
+    summary_df = read("auxiliary_composite_summary")
+    trades_df = read("auxiliary_composite_trades")
+    ownership_df = read("auxiliary_ownership_events")
+    parts = ["<h2>辅助增强对照（观察版）</h2><p class='footnote'>原组合与原权重不变。仅原组合空仓且出现新的上涨环境辅助信号时满仓补充；"
+             "原组合接管则继续持仓，不重复使用旧信号。完整短线版仅在单因子区展示，不直接进入原打分。</p>"
+             "<p class='footnote'>历史增益尚未通过稳健性确认，分段表现有退化；本区不是新的默认主策略。成本为单边5bp。</p>"]
+    for sid, meta in COMPOSITE_STRATEGY_META.items():
+        enhanced_id = sid + SUFFIX
+        daily = _prepare_composite_daily(daily_df, enhanced_id, input_df)
+        if daily.empty:
+            continue
+        summary = summary_df.loc[summary_df.strategy_id.eq(enhanced_id)].iloc[0]
+        trades = _prepare_composite_trades(trades_df, enhanced_id)
+        ownership = ownership_df.loc[ownership_df.strategy_id.eq(enhanced_id)].copy()
+        ownership[DATE_COL] = pd.to_datetime(ownership[DATE_COL])
+        parts.append(f"<h3>{_escape(meta['name'])} + 辅助补仓</h3>"
+                     f"<p>最新日期：{_date_text(daily[DATE_COL].iloc[-1])}；当前持仓来源：{_escape(daily.owner.iloc[-1])}。"
+                     f"辅助区间 {int(summary.auxiliary_entries)} 段，增加持仓 {int(summary.extra_exposure_days)} 日；"
+                     f"无交易接管 {len(ownership)} 次。</p>")
+        rows = [
+            ("年化超额", _format_pct_value(summary.base_excess_annual_return, 2), _format_pct_value(summary.excess_annual_return, 2)),
+            ("Sharpe", _format_float(summary.base_sharpe, 2), _format_float(summary.sharpe, 2)),
+            ("最大回撤", _format_pct_value(summary.base_max_drawdown, 2), _format_pct_value(summary.max_drawdown, 2)),
+        ]
+        parts.append("<table><thead><tr><th>指标</th><th>原组合</th><th>辅助增强观察版</th></tr></thead><tbody>" +
+                     "".join(f"<tr><td>{label}</td><td>{base}</td><td>{enhanced}</td></tr>" for label, base, enhanced in rows) + "</tbody></table>")
+        parts.append(_make_composite_strategy_charts(daily, trades, meta["name"], meta.get("strong_threshold")))
+    return "".join(parts)
+
+
 def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = None, report_title: str = "宽基择时信号报告") -> dict[str, Any]:
     input_dir = Path(input_dir)
     results_dir = input_dir / "results"
@@ -1064,6 +1138,18 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
     factor_desc_map = _load_factor_descriptions(taxonomy_path)
 
     input_df = _read_csv(input_dir, ["data/input_snapshot.csv", "input_snapshot.csv"])
+    # Auxiliary columns are joined only for charts, never for the original event/score pool.
+    selected_chart_input = input_df
+    auxiliary_input = _read_csv(input_dir, ["data/auxiliary_input_snapshot.csv"], optional=True)
+    if not auxiliary_input.empty:
+        from auxiliary_signal_rules import FACTOR_COLUMNS
+        selected_chart_input = input_df.copy()
+        for frame in (selected_chart_input, auxiliary_input):
+            frame[DATE_COL] = pd.to_datetime(frame[DATE_COL])
+        selected_chart_input = selected_chart_input.merge(
+            auxiliary_input[[CODE_COL, DATE_COL, *FACTOR_COLUMNS]], on=[CODE_COL, DATE_COL],
+            how="left", validate="one_to_one",
+        )
     strategy_df = _read_csv(
         input_dir,
         [
@@ -1222,12 +1308,14 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
             row_copy = row.copy()
             row_copy.attrs["_equity_df"] = _selected_positions_to_equity_curve(selected_rule_positions_df, row)
             row_copy.attrs["_trade_df"] = _filter_selected_rule_rows(selected_rule_trades_df, row)
+            from auxiliary_signal_rules import RULE_ID as AUXILIARY_RULE_ID
+            row_copy.attrs["_actual_trade_markers"] = str(row.get("rule_id", "")) == AUXILIARY_RULE_ID
             try:
                 chart_html = (
                     "<div class='rule-selected-metrics'>"
                     f"{_selected_rule_metric_html(row, status_row)}"
                     "</div>"
-                    + _make_rule_pair_html(input_df, signals_df, row_copy, desc)
+                    + _make_rule_pair_html(selected_chart_input, signals_df, row_copy, desc)
                 )
             except Exception as exc:
                 chart_html = (
@@ -1280,6 +1368,7 @@ def build_view_data(input_dir: str | Path, taxonomy_path: str | Path | None = No
         "rule_pair_cards": rule_pair_cards,
         "rule_pair_signal_overview": rule_pair_signal_overview,
         "composite_strategy_views": composite_strategy_views,
+        "auxiliary_comparison_html": _build_auxiliary_comparison_html(input_dir, input_df),
         "bullish_structure": bullish_structure,
         "bearish_structure": bearish_structure,
     }
@@ -1374,7 +1463,7 @@ def _render_composite_metrics(view: dict[str, Any]) -> str:
 """
 
 
-def _render_composite_strategy_module(views: list[dict[str, Any]]) -> str:
+def _render_composite_strategy_module(views: list[dict[str, Any]], auxiliary_html: str = "") -> str:
     if not views:
         return """
 <div class="card">
@@ -1399,6 +1488,9 @@ def _render_composite_strategy_module(views: list[dict[str, Any]]) -> str:
             f"{_render_composite_metrics(view)}"
             "</div>"
         )
+    if auxiliary_html:
+        buttons.append("<button class='composite-tab-btn' onclick=\"switchCompositeStrategy(event,'composite-strategy-panel-auxiliary')\">辅助增强对照（观察版）</button>")
+        panels.append("<div id='composite-strategy-panel-auxiliary' class='composite-strategy-panel'>" + auxiliary_html + "</div>")
     return (
         "<div class='composite-inner-tabs'>"
         + "".join(buttons)
@@ -1796,7 +1888,7 @@ def render_html(v: dict[str, Any]) -> str:
     z20_stats_html = _render_z20_stats(v.get("strategy_z20_stats", []))
     rule_pair_signal_overview_html = _render_rule_pair_signal_overview(v.get("rule_pair_signal_overview", {}))
     composite_views = v.get("composite_strategy_views", []) or []
-    composite_module_html = _render_composite_strategy_module(composite_views)
+    composite_module_html = _render_composite_strategy_module(composite_views, v.get("auxiliary_comparison_html", ""))
     composite_exposures = []
     for composite_view in composite_views[:2]:
         value = _safe_float((composite_view.get("status", {}) or {}).get("exposure"))
@@ -1920,7 +2012,8 @@ table{{width:100%;border-collapse:collapse;font-size:13px}}
 th,td{{padding:8px 12px;text-align:center;border-bottom:1px solid #eee}}
 th{{background:#f8f9fa;font-weight:600;color:#555}}
 tr:hover{{background:#f8f9fa}}
-.rule-pair-grid{{display:grid;grid-template-columns:1fr;gap:20px}}
+.rule-pair-grid{{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;min-width:0}}
+.rule-pair-card{{min-width:0}}
 .rule-pair-card{{background:#fafafa;border-radius:10px;padding:16px;border:1px solid #e8e8e8}}
 .rule-pair-card.hidden{{display:none}}
 .rule-pair-header{{margin-bottom:12px}}
@@ -2048,7 +2141,7 @@ tr:hover{{background:#f8f9fa}}
 .footnote{{font-size:12px;color:#667085;line-height:1.6;margin:10px 0 0 0}}
 .chart-error{{padding:16px;border:1px solid #f3c7c7;background:#fff4f4;color:#b42318;border-radius:8px;font-size:13px}}
 @media(max-width:1200px){{.overview-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.composite-current-grid{{grid-template-columns:repeat(4,minmax(120px,1fr))}}.composite-metric-grid{{grid-template-columns:repeat(3,minmax(120px,1fr))}}}}
-@media(max-width:900px){{.overview-grid{{grid-template-columns:1fr}}.rule-pair-grid{{grid-template-columns:1fr}}.signal-stats{{flex-direction:column;align-items:center}}.composite-logic-grid{{grid-template-columns:1fr}}.composite-current-grid,.composite-metric-grid{{grid-template-columns:repeat(2,minmax(120px,1fr))}}}}
+@media(max-width:900px){{.overview-grid{{grid-template-columns:1fr}}.rule-pair-grid{{grid-template-columns:minmax(0,1fr)}}.signal-stats{{flex-direction:column;align-items:center}}.composite-logic-grid{{grid-template-columns:1fr}}.composite-current-grid,.composite-metric-grid{{grid-template-columns:repeat(2,minmax(120px,1fr))}}}}
 @media(max-width:1100px){{.rule-signal-columns{{grid-template-columns:1fr}}.score-mini-grid{{grid-template-columns:repeat(2,minmax(140px,1fr))}}}}
 """
 

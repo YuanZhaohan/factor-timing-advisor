@@ -23,6 +23,7 @@ from role_strategy import (
     update_monthly_refresh_daily_score_incremental,
 )
 from selected_single_factor_rules import run_selected_single_factor_rules
+from auxiliary_signal_rules import load_pipeline_input
 from composite_timing_strategies import run_composite_timing_strategies
 from signal_generation import save_signal_table
 from baseline_score_strategy import backtest_z_rules, build_all_z_rules, plot_best_rule
@@ -99,7 +100,7 @@ def run_upstream_pipeline(
     for key in ["root", "data", "results", "signals", "events", "rule_pair", "score", "plots"]:
         dirs[key].mkdir(parents=True, exist_ok=True)
 
-    df = load_data(csv_path)
+    df = load_pipeline_input(csv_path, output_dir)
     write_table(df, dirs["data"] / "input_snapshot.csv")
 
     signal_table = save_signal_table(df, output_dir=dirs["signals"])
@@ -155,7 +156,7 @@ def run_score_update_pipeline(
     for key in ["root", "data", "results", "signals", "score"]:
         dirs[key].mkdir(parents=True, exist_ok=True)
 
-    df = load_data(csv_path)
+    df = load_pipeline_input(csv_path, output_dir)
     write_table(df, dirs["data"] / "input_snapshot.csv")
     signal_table = save_signal_table(df, output_dir=dirs["signals"])
     daily_score = update_monthly_refresh_daily_score_incremental(
@@ -199,7 +200,7 @@ def run_daily_refresh_pipeline(
     for key in ["root", "data", "results", "signals", "events", "rule_pair", "score", "plots"]:
         dirs[key].mkdir(parents=True, exist_ok=True)
 
-    df = load_data(csv_path)
+    df = load_pipeline_input(csv_path, output_dir)
     write_table(df, dirs["data"] / "input_snapshot.csv")
     signal_table = save_signal_table(df, output_dir=dirs["signals"])
     event_summary, trade_summary = run_event_study(

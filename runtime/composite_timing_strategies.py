@@ -65,6 +65,11 @@ def _load_inputs(
     if missing := required_specs.difference(specs.columns):
         raise KeyError(f"selected-rule specs missing columns: {sorted(missing)}")
 
+    # Displaying an auxiliary rule must not create a fifth voting category.
+    auxiliary_ids = specs.loc[specs["category"].astype(str).str.startswith("辅助"), "rule_id"]
+    positions = positions.loc[~positions.rule_id.isin(auxiliary_ids)].copy()
+    specs = specs.loc[~specs.rule_id.isin(auxiliary_ids)].copy()
+
     positions[DATE_COL] = pd.to_datetime(positions[DATE_COL])
     if positions.duplicated([DATE_COL, "rule_id"]).any():
         raise ValueError("duplicate date/rule_id rows in selected-rule positions")
@@ -510,6 +515,8 @@ def run_composite_timing_strategies(
     (output_path / "current_composite_signal.md").write_text(
         _signal_markdown(latest_status), encoding="utf-8"
     )
+    from auxiliary_composite_strategies import run_auxiliary_composites
+    auxiliary_stats = run_auxiliary_composites(out_root, daily, cost_bps)
     return {
         "composite_strategy_count": len(strategy_specs),
         "composite_rule_weight_rows": len(rule_weights),
@@ -517,6 +524,7 @@ def run_composite_timing_strategies(
         "composite_summary_rows": len(summary),
         "composite_trade_rows": len(trades),
         "composite_latest_status_rows": len(latest_status),
+        **auxiliary_stats,
     }
 
 
